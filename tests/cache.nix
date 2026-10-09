@@ -28,6 +28,7 @@ pkgs.testers.runNixOSTest {
           enable = true;
           cacheDir = "/var/lib/cache";
           statusDir = "/var/lib/status";
+          openFirewall = true;
         };
       };
 

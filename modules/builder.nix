@@ -23,6 +23,18 @@ let
   ) (builtins.attrNames cfg.repos);
 
   enabledRemotes = lib.filterAttrs (_: rb: rb.enable) cfg.remoteBuilders;
+
+  # flock wrapper: a lane that finds its repo busy exits 75 (EX_TEMPFAIL)
+  # with a log line instead of trampling the other lane's state.
+  lockedPipeline = pkgs.writeShellScript "ftl-pipeline-locked" ''
+    lock="$1"
+    ${pkgs.util-linux}/bin/flock -n -E 75 "$lock" ${lib.getExe scripts.ftl-pipeline}
+    rc=$?
+    if [ "$rc" = 75 ]; then
+      echo "ftl-pipeline[$FTL_REPO_NAME/$FTL_LANE]: another lane of $FTL_REPO_NAME is running; skipping this run" >&2
+    fi
+    exit "$rc"
+  '';
 in
 {
   imports = [
@@ -113,10 +125,49 @@ in
       };
     };
 
+    verify = {
+      mode = lib.mkOption {
+        type = lib.types.enum [
+          "none"
+          "ssh"
+          "gpg"
+        ];
+        default = "none";
+        description = ''
+          Signature verification of the tip of each repo's branch before the
+          pipeline builds on it. Without it, anything that lands on the branch
+          is wrapped in a builder-signed commit and promoted, so host-side
+          signature checks only prove write access to the forge. The allowed
+          signers must include the builder's own signing key, since the
+          previous promotion is a builder commit.
+        '';
+      };
+      allowedSignersFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = "OpenSSH allowed_signers file (ssh mode).";
+      };
+      gpgHome = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = "GNUPGHOME whose keyring holds exactly the trusted public keys (gpg mode).";
+      };
+    };
+
+    knownHostsFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = ''
+        known_hosts file pinning the environment repos' SSH host keys. Without
+        it ssh consults `programs.ssh.knownHosts` (/etc/ssh/ssh_known_hosts)
+        and the pipeline user's own known_hosts; unknown hosts are refused.
+      '';
+    };
+
     deployKeyFile = lib.mkOption {
       type = lib.types.nullOr lib.types.path;
       default = null;
-      description = "SSH key used to push refs to the environment repos.";
+      description = "SSH key used to push refs to the environment repos (readable by the ftl user).";
     };
 
     cache = {
@@ -128,12 +179,16 @@ in
       };
       secretKeyFile = lib.mkOption {
         type = lib.types.nullOr lib.types.path;
-        default = "${rootDir}/keys/cache.secret";
-        defaultText = lib.literalExpression ''"''${config.ftl.rootDir}/keys/cache.secret"'';
+        default = null;
+        example = "/var/lib/ftl/keys/cache.secret";
         description = ''
-          NAR signing secret, readable by the ftl group (create it with
-          `nix key generate-secret`). While it is missing, builds still run
-          but nothing is pushed to the cache.
+          NAR signing secret (create it with `nix key generate-secret`). It is
+          handed to nix-daemon via `secret-key-files`, which signs every
+          locally built path at build time, so the pipeline user never reads
+          it: keep it `0400 root:root`. The file must exist before this
+          configuration is activated; nix-daemon fails every local build
+          while it is missing. When null, the pipeline builds but pushes
+          nothing to the cache (unsigned paths are never published).
         '';
       };
       publicKey = lib.mkOption {
@@ -253,8 +308,16 @@ in
         message = "ftl.builder.signing.key must be set when signing is enabled";
       }
       {
-        assertion = cfg.cache.dir == null || cfg.cache.secretKeyFile != null;
-        message = "ftl.builder.cache.secretKeyFile must be set when cache.dir is set (unsigned caches are not served)";
+        assertion = cfg.verify.mode != "ssh" || cfg.verify.allowedSignersFile != null;
+        message = "ftl.builder.verify.allowedSignersFile must be set for verify.mode = \"ssh\"";
+      }
+      {
+        assertion = cfg.verify.mode != "gpg" || cfg.verify.gpgHome != null;
+        message = "ftl.builder.verify.gpgHome must be set for verify.mode = \"gpg\"";
+      }
+      {
+        assertion = lib.all (rb: rb.publicHostKey != null) (builtins.attrValues enabledRemotes);
+        message = "ftl.builder.remoteBuilders.<name>.publicHostKey must be set: outputs of an unauthenticated remote would be signed and promoted";
       }
     ];
 
@@ -277,10 +340,17 @@ in
 
     # Let the builder host substitute from its own cache, so aggressive GC of
     # the local store costs nothing.
-    nix.settings = lib.mkIf (cfg.cache.dir != null && cfg.cache.publicKey != null) {
-      extra-substituters = [ "file://${cfg.cache.dir}?priority=20" ];
-      extra-trusted-public-keys = [ cfg.cache.publicKey ];
-    };
+    nix.settings = lib.mkMerge [
+      (lib.mkIf (cfg.cache.dir != null && cfg.cache.publicKey != null) {
+        extra-substituters = [ "file://${cfg.cache.dir}?priority=20" ];
+        extra-trusted-public-keys = [ cfg.cache.publicKey ];
+      })
+      # nix-daemon (root) signs at build time; the key never enters the
+      # pipeline user's reach, where the flake it evaluates could read it.
+      (lib.mkIf (cfg.cache.secretKeyFile != null) {
+        secret-key-files = [ (toString cfg.cache.secretKeyFile) ];
+      })
+    ];
 
     nix.distributedBuilds = lib.mkIf (enabledRemotes != { }) true;
     nix.buildMachines = lib.mapAttrsToList (_: rb: {
@@ -331,8 +401,16 @@ in
             // lib.optionalAttrs (cfg.signing.gnupgHome != null) { GNUPGHOME = cfg.signing.gnupgHome; }
             // lib.optionalAttrs (cfg.deployKeyFile != null) { FTL_DEPLOY_KEY = cfg.deployKeyFile; }
             // lib.optionalAttrs (cfg.cache.dir != null) { FTL_CACHE_DIR = cfg.cache.dir; }
-            // lib.optionalAttrs (cfg.cache.secretKeyFile != null) {
-              FTL_CACHE_SECRET = cfg.cache.secretKeyFile;
+            // lib.optionalAttrs (cfg.cache.secretKeyFile != null) { FTL_CACHE_SIGNED = "1"; }
+            // lib.optionalAttrs (cfg.verify.mode != "none") { FTL_VERIFY_MODE = cfg.verify.mode; }
+            // lib.optionalAttrs (cfg.verify.allowedSignersFile != null) {
+              FTL_ALLOWED_SIGNERS = toString cfg.verify.allowedSignersFile;
+            }
+            // lib.optionalAttrs (cfg.verify.gpgHome != null) {
+              FTL_VERIFY_GPG_HOME = toString cfg.verify.gpgHome;
+            }
+            // lib.optionalAttrs (cfg.knownHostsFile != null) {
+              FTL_KNOWN_HOSTS = toString cfg.knownHostsFile;
             }
             // lib.optionalAttrs (cfg.metricsDir != null) {
               FTL_METRICS_FILE = "${cfg.metricsDir}/ftl-${repoName}.prom";
@@ -345,11 +423,37 @@ in
               Type = "oneshot";
               User = cfg.user;
               Group = cfg.group;
-              ExecStart = lib.getExe scripts.ftl-pipeline;
+              # Lanes of one repo share the mirror, manifest, status and
+              # promotion log: never let two of them run at once.
+              ExecStart = "${lockedPipeline} ${cfg.stateDir}/${repoName}.lock";
               TimeoutStartSec = "12h";
               Nice = 10;
               IOSchedulingClass = "best-effort";
               IOSchedulingPriority = 7;
+
+              # Sandboxing. Nix goes through the daemon socket, git and ssh
+              # through the network; the only writable trees are ftl's own.
+              NoNewPrivileges = true;
+              PrivateTmp = true;
+              ProtectSystem = "strict";
+              ProtectHome = true;
+              ReadWritePaths = [
+                cfg.stateDir
+                cfg.statusDir
+              ]
+              ++ lib.optional (cfg.cache.dir != null) cfg.cache.dir
+              ++ lib.optional (cfg.metricsDir != null) cfg.metricsDir
+              ++ lib.optional (cfg.signing.gnupgHome != null) cfg.signing.gnupgHome;
+              ProtectKernelTunables = true;
+              ProtectKernelModules = true;
+              ProtectKernelLogs = true;
+              ProtectControlGroups = true;
+              ProtectClock = true;
+              ProtectHostname = true;
+              RestrictSUIDSGID = true;
+              RestrictRealtime = true;
+              LockPersonality = true;
+              SystemCallArchitectures = "native";
             };
           };
         }

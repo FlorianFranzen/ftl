@@ -31,6 +31,10 @@ pkgs.testers.runNixOSTest {
       };
       environment.etc."ftl-fixture/flake.nix".source = ./fixtures/env/flake.nix;
 
+      # The sandboxed pipeline unit pushes to a local bare repo here (real
+      # deployments push over the network).
+      systemd.services.ftl-pipeline-fixture-default.serviceConfig.ReadWritePaths = [ "/var/lib/origin.git" ];
+
       ftl.builder = {
         enable = true;
         promote = true;
@@ -38,7 +42,14 @@ pkgs.testers.runNixOSTest {
           format = "ssh";
           key = "/var/lib/ftl/keys/sign";
         };
-        # cache, status and keys use the ftl.rootDir defaults
+        # Only build on top of commits signed by a listed key (human or builder).
+        verify = {
+          mode = "ssh";
+          allowedSignersFile = "/etc/ftl/allowed_signers";
+        };
+        # nix-daemon signs with this root-only key; cache and status use the
+        # ftl.rootDir defaults
+        cache.secretKeyFile = "/var/lib/ftl/keys/cache.secret";
         repos.fixture = {
           url = "/var/lib/origin.git";
           branch = "main";
@@ -59,22 +70,35 @@ pkgs.testers.runNixOSTest {
             f"jq -r '.attrs[\"{attr}\"].{field}' /var/lib/ftl/status/fixture.json"
         ).strip()
 
-    def narinfo_exists(out_path):
+    def store_hash(out_path):
         m = re.match(r"/nix/store/([a-z0-9]{32})-", out_path)
         assert m is not None, f"not a store path: {out_path!r}"
-        return builder.execute(f"test -f /var/lib/ftl/cache/{m.group(1)}.narinfo")[0] == 0
+        return m.group(1)
+
+    def narinfo_exists(out_path):
+        return builder.execute(f"test -f /var/lib/ftl/cache/{store_hash(out_path)}.narinfo")[0] == 0
 
     builder.wait_for_unit("multi-user.target")
 
     # --- keys and fixture material ------------------------------------------
     builder.succeed("ssh-keygen -q -t ed25519 -N \"\" -f /var/lib/ftl/keys/sign && chown ftl /var/lib/ftl/keys/sign")
+    builder.succeed("mkdir -p /root/keys && ssh-keygen -q -t ed25519 -N \"\" -f /root/keys/human")
+    builder.succeed(
+        "mkdir -p /etc/ftl",
+        "{ printf 'human@test %s\\n' \"$(cut -d' ' -f1-2 /root/keys/human.pub)\";"
+        "  printf 'ftl@localhost %s\\n' \"$(cut -d' ' -f1-2 /var/lib/ftl/keys/sign.pub)\"; }"
+        " > /etc/ftl/allowed_signers",
+    )
+    # The NAR key is root-only: nix-daemon signs, the pipeline user never reads it.
     builder.succeed(
         "nix key generate-secret --key-name vm-test-1 > /tmp/c.sec",
-        "install -o root -g ftl -m 0440 /tmp/c.sec /var/lib/ftl/keys/cache.secret",
+        "install -o root -g root -m 0400 /tmp/c.sec /var/lib/ftl/keys/cache.secret",
     )
+    builder.fail("su ftl -c 'cat /var/lib/ftl/keys/cache.secret'")
     builder.succeed("mkdir -p /var/lib/fixture-dep && echo v1 > /var/lib/fixture-dep/data")
 
     # --- seed the environment repo ------------------------------------------
+    human_git = "git -c user.name=human -c user.email=human@test -c gpg.format=ssh -c user.signingkey=/root/keys/human"
     builder.succeed(
         "git init -q --bare -b main /var/lib/origin.git"
     )
@@ -83,7 +107,7 @@ pkgs.testers.runNixOSTest {
         " cp /etc/ftl-fixture/flake.nix .;"
         " git init -q -b main; git add flake.nix;"
         " nix flake lock; git add flake.lock;"
-        " git -c user.name=seed -c user.email=seed@test commit -q -m init;"
+        f" {human_git} commit -q -S -m init;"
         " git push -q /var/lib/origin.git main;"
         " chown -R ftl:ftl /var/lib/origin.git"
     )
@@ -146,7 +170,7 @@ pkgs.testers.runNixOSTest {
     builder.succeed(
         "set -e; cd /tmp/seed; git pull -q --ff-only /var/lib/origin.git main;"
         " echo docs > README; git add README;"
-        " git -c user.name=human -c user.email=human@test commit -q -m docs;"
+        f" {human_git} commit -q -S -m docs;"
         " git push -q /var/lib/origin.git main;"
         " chown -R ftl:ftl /var/lib/origin.git"
     )
@@ -158,9 +182,37 @@ pkgs.testers.runNixOSTest {
     builder.succeed(f"git -C /var/lib/origin.git merge-base --is-ancestor {human} {main5}")
     assert pins_at("main") == {"gaming": "latest"}, pins_at("main")
 
+    # every path the pipeline pushed carries the daemon's signature
+    builder.succeed(
+        "grep -q '^Sig: vm-test-1:' /var/lib/ftl/cache/"
+        + store_hash(attr_field("nixos-alpha", "outPath")) + ".narinfo"
+    )
+
+    # --- run 6: unsigned commit on main -> refused, nothing built or pushed ---
+    builder.succeed(
+        "set -e; cd /tmp/seed; git pull -q --ff-only /var/lib/origin.git main;"
+        " echo rogue > README; git add README;"
+        " git -c user.name=rogue -c user.email=rogue@test commit -q -m rogue;"
+        " git push -q /var/lib/origin.git main;"
+        " chown -R ftl:ftl /var/lib/origin.git"
+    )
+    rogue = origin_rev("main")
+    builder.succeed("echo 'v6 unsigned' > /var/lib/fixture-dep/data")
+    builder.fail("systemctl start ftl-pipeline-fixture-default.service")
+    assert origin_rev("main") == rogue, "pipeline built on an unsigned tip"
+    assert builder.succeed("jq -r .phase /var/lib/ftl/status/fixture.json").strip() == "unverified"
+    assert builder.succeed("jq -r .candidate /var/lib/ftl/status/fixture.json").strip() == rogue
+
+    # --- lanes of one repo are serialized -------------------------------------
+    builder.execute("su ftl -c 'flock /var/lib/ftl/state/fixture.lock sleep 300' >/dev/null 2>&1 &")
+    builder.wait_until_succeeds("test -e /var/lib/ftl/state/fixture.lock")
+    builder.fail("systemctl start ftl-pipeline-fixture-default.service")
+    builder.succeed("journalctl -u ftl-pipeline-fixture-default.service | grep -q 'another lane of fixture is running'")
+    builder.succeed("pkill -f 'sleep 300'")
+
     # no force pushes ever happened on main
     builder.succeed(
-        f"git -C /var/lib/origin.git merge-base --is-ancestor {seed} {main5}"
+        f"git -C /var/lib/origin.git merge-base --is-ancestor {seed} {rogue}"
     )
   '';
 }

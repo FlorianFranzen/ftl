@@ -183,10 +183,36 @@ in
             pkgs.git
             pkgs.openssh
           ];
-          environment.NIX_CONFIG = "experimental-features = nix-command flakes";
+          environment = {
+            NIX_CONFIG = "experimental-features = nix-command flakes";
+            # Root would otherwise open /nix/store directly, which the
+            # sandbox below makes read-only; the daemon does the writing.
+            NIX_REMOTE = "daemon";
+            # Fetcher and eval caches (/root is read-only under the sandbox).
+            XDG_CACHE_HOME = "${cfg.stateDir}/cache";
+          };
           serviceConfig = {
             Type = "oneshot";
             ExecStart = "${ftl-layers}/bin/ftl-layers update";
+
+            # Runs as root (profiles under /nix/var and systemctl), so confine
+            # it to what it needs: its state and the layer profiles.
+            NoNewPrivileges = true;
+            PrivateTmp = true;
+            ProtectSystem = "strict";
+            ReadWritePaths = [
+              cfg.stateDir
+              profileDir
+            ];
+            ProtectKernelTunables = true;
+            ProtectKernelModules = true;
+            ProtectKernelLogs = true;
+            ProtectControlGroups = true;
+            ProtectClock = true;
+            RestrictSUIDSGID = true;
+            RestrictRealtime = true;
+            LockPersonality = true;
+            SystemCallArchitectures = "native";
           };
         };
 

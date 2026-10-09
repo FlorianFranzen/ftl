@@ -81,28 +81,70 @@ outputs = { self, nixpkgs, ftl, home-manager, ... }@inputs:
 
   Hosts list their layers in `host.nix`. Each layer's revision comes from
   `ftl-layers.json`: `latest`, or the commit it last built at.
-- **`ftl.builder`** (pipeline) bumps flake inputs per lane, builds everything in
-  `ftlManifest` with `nix-fast-build`, signs and pushes results into a
-  `file://` cache, and fast-forwards the deployed branch with a signed lock-bump
-  commit once every required host builds. A red layer is pinned in
-  `ftl-layers.json`, never blocking.
-- **`ftl.cache`** serves that cache and the status JSON.
+- **`ftl.builder`** (pipeline) verifies the signature on the branch tip, bumps
+  flake inputs per lane, builds everything in `ftlManifest` with
+  `nix-fast-build`, pushes the (daemon-signed) results into a `file://` cache,
+  and fast-forwards the deployed branch with a signed lock-bump commit once
+  every required host builds. A red layer is pinned in `ftl-layers.json`, never
+  blocking. Lanes of one repo run one at a time.
+- **`ftl.cache`** serves that cache and the status JSON. It is plain HTTP on
+  all interfaces; NAR signatures carry the trust, and the status pages list
+  the fleet's hosts, so `openFirewall` is off by default.
 - **Directories:** everything lives under `ftl.rootDir` (default
   `/var/lib/ftl`, owned by root, 0755):
   - `state/`: private pipeline state, `ftl` only;
   - `status/` and `cache/`: published by nginx;
-  - `keys/`: owned by root, readable by group `ftl`; holds `cache.secret`.
+  - `keys/`: owned by root, readable by group `ftl`; holds the keys the
+    pipeline user needs (deploy key, commit signing key).
 
   Each path has its own option, e.g. `ftl.builder.cache.dir`. A typical setup
   mounts a large disk at `<rootDir>/cache` and leaves the rest on the system
-  disk. While `keys/cache.secret` is missing, the pipeline builds but does not
-  push to the cache, and sends an alert.
+  disk.
 - **`ftl.layers`** installs the layers on hosts, verifies the target commit, and
   provides `ftl-layers update | list | rollback <name>`.
 - **`ftl.comin`** connects [comin](https://github.com/nlewo/comin), which deploys
   the base system. Its post-deploy hook updates the layers; on lanzaboote hosts
   it also mirrors comin's generation into the `system` profile.
 - **`ftl.client`** provides substituters, gc defaults and `ftl-status`.
+
+### Trust model
+
+The builder is the fleet's trust anchor: whatever it signs, every host
+deploys. Keep these in mind when setting it up.
+
+- **The pipeline user evaluates untrusted code.** Anyone who can land a commit
+  on the branch, or publish to a flake input that a lane bumps, controls what
+  `nix flake update` fetches and what gets evaluated and built. A flake input
+  such as `path:/some/dir` copies any directory the `ftl` user can read into
+  the world-readable store, so no secret that must stay secret may be readable
+  by `ftl`. Hence:
+  - the NAR signing key (`ftl.builder.cache.secretKeyFile`) is `0400 root` and
+    used by nix-daemon (`secret-key-files`), which signs every locally built
+    path. The pipeline never reads it, and pushes nothing while no key is
+    configured. The file must exist before the configuration is activated;
+    nix-daemon fails local builds while it is missing;
+  - the deploy key and the commit signing key are used by `ftl` itself, so
+    they are exposed to the same risk. Prefer a smartcard-backed OpenPGP key
+    (`signing.format = "openpgp"`, `signing.gnupgHome`) and a deploy key the
+    forge restricts to fast-forwards of the deployed branch.
+- **The builder's signature says "built green on top of a trusted tip".**
+  With `ftl.builder.verify` the pipeline refuses to build on a branch tip that
+  is not signed by a listed key (humans, CI, and the builder itself for its own
+  previous promotion). Without it, any write access to the forge yields a
+  builder-signed deployment. Lanes that bump third-party inputs extend the
+  same trust to those inputs' maintainers.
+- **Hosts must verify too.** comin checks the deployed commit when
+  `services.comin.gpgPublicKeyPaths` or `services.comin.sshAllowedSignersPath`
+  is set; `ftl.layers.verify` covers manual and timer-driven layer updates.
+  Without these, hosts deploy whatever the branch points at.
+- **Public surfaces.** The status JSON is public: it names hosts, attrs and
+  store paths. Credentials embedded in a repo URL are stripped before
+  publishing, but the URL is still visible to local users via `systemctl
+  show`; use SSH URLs with `deployKeyFile` instead of tokens. ntfy
+  notifications carry attr names and evaluation error excerpts; use a private
+  topic. Pin the forge's SSH host key with `ftl.builder.knownHostsFile` or
+  `programs.ssh.knownHosts`; unknown hosts are refused, not trusted on first
+  use. Remote builders require `publicHostKey`.
 
 ## Tests
 
@@ -118,5 +160,6 @@ outputs = { self, nixpkgs, ftl, home-manager, ... }@inputs:
 - VM tests:
   - `modules`: a `mkFlake` host with every ftl module enabled;
   - `layers`: layer install, update, pins and rollback, plus the comin hook;
-  - `pipeline`: fast-forward, layer pinning, broken builds, retention;
+  - `pipeline`: fast-forward, layer pinning, broken builds, retention,
+    daemon-signed cache, refusal of an unsigned branch tip, lane locking;
   - `cache`: signed substitution.

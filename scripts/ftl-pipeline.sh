@@ -5,10 +5,12 @@
 #
 # Required: FTL_REPO_NAME FTL_REPO_URL FTL_STATE_DIR FTL_STATUS_DIR FTL_SYSTEMS
 # Optional: FTL_BRANCH (main) FTL_LANE (default) FTL_LANE_INPUTS ("" = all)
-#           FTL_CACHE_DIR FTL_CACHE_SECRET FTL_PROMOTE (0) FTL_KEEP_GENERATIONS (5)
+#           FTL_CACHE_DIR FTL_CACHE_SIGNED (1 when nix-daemon signs built paths;
+#           nothing is pushed otherwise) FTL_PROMOTE (0) FTL_KEEP_GENERATIONS (5)
 #           FTL_SIGN_FORMAT (none|ssh|openpgp) FTL_SIGN_KEY FTL_GIT_NAME FTL_GIT_EMAIL
-#           FTL_DEPLOY_KEY FTL_METRICS_FILE FTL_NTFY_URL FTL_EVAL_WORKERS
-#           FTL_EXTRA_BUILD_ARGS
+#           FTL_VERIFY_MODE (none|ssh|gpg) FTL_ALLOWED_SIGNERS FTL_VERIFY_GPG_HOME
+#           FTL_DEPLOY_KEY FTL_KNOWN_HOSTS FTL_METRICS_FILE FTL_NTFY_URL
+#           FTL_EVAL_WORKERS FTL_EXTRA_BUILD_ARGS
 
 : "${FTL_BRANCH:=main}"
 : "${FTL_LANE:=default}"
@@ -16,6 +18,7 @@
 : "${FTL_PROMOTE:=0}"
 : "${FTL_KEEP_GENERATIONS:=5}"
 : "${FTL_SIGN_FORMAT:=none}"
+: "${FTL_VERIFY_MODE:=none}"
 : "${FTL_EVAL_WORKERS:=2}"
 
 state="$FTL_STATE_DIR/$FTL_REPO_NAME"
@@ -23,7 +26,6 @@ mirror="$state/mirror.git"
 work="$state/work-$FTL_LANE"
 status_file="$FTL_STATUS_DIR/$FTL_REPO_NAME.json"
 jsonl="$state/promoted.jsonl"
-today="$(date -u +%F)"
 now="$(date -u +%FT%TZ)"
 
 mkdir -p "$state" "$FTL_STATUS_DIR"
@@ -36,9 +38,42 @@ notify() {
     log "ntfy notification failed"
 }
 
-if [ -n "${FTL_DEPLOY_KEY:-}" ]; then
-  export GIT_SSH_COMMAND="ssh -i $FTL_DEPLOY_KEY -o IdentitiesOnly=yes"
-fi
+# ssh: never trust a host on first use (no tty means it would fail anyway,
+# but say so explicitly), optionally pin the repos' host keys to one file.
+ssh_cmd="ssh -o BatchMode=yes -o StrictHostKeyChecking=yes"
+[ -n "${FTL_KNOWN_HOSTS:-}" ] && ssh_cmd="$ssh_cmd -o UserKnownHostsFile=$FTL_KNOWN_HOSTS"
+[ -n "${FTL_DEPLOY_KEY:-}" ] && ssh_cmd="$ssh_cmd -i $FTL_DEPLOY_KEY -o IdentitiesOnly=yes"
+export GIT_SSH_COMMAND="$ssh_cmd"
+
+# Status pages are public: never publish credentials embedded in the repo URL.
+repo_public="$(sed -E 's#^([a-z+]+://)[^/@]*@#\1#' <<<"$FTL_REPO_URL")"
+
+verify_commit() { # sha -> 0 iff signed by a trusted key
+  local validity
+  case "$FTL_VERIFY_MODE" in
+  none) return 0 ;;
+  ssh)
+    validity="$(git -c gpg.format=ssh -c "gpg.ssh.allowedSignersFile=${FTL_ALLOWED_SIGNERS:?}" \
+      log -1 --format='%G?' "$1")"
+    ;;
+  gpg)
+    validity="$(GNUPGHOME="${FTL_VERIFY_GPG_HOME:?}" git -c gpg.format=openpgp log -1 --format='%G?' "$1")"
+    ;;
+  *)
+    log "unknown FTL_VERIFY_MODE '$FTL_VERIFY_MODE'"
+    return 1
+    ;;
+  esac
+  # ssh: only G = signed by a listed principal (U = valid but unlisted key).
+  # gpg: keyring holds only trusted keys, U only means "no ownertrust".
+  case "$FTL_VERIFY_MODE:$validity" in
+  *:G | gpg:U) return 0 ;;
+  *)
+    log "commit $1 has an invalid or untrusted signature (status=$validity)"
+    return 1
+    ;;
+  esac
+}
 
 # --- sync -------------------------------------------------------------------
 if [ ! -d "$mirror" ]; then
@@ -47,6 +82,9 @@ else
   git -C "$mirror" fetch --prune origin
 fi
 
+# Leave any previous worktree before deleting it: the retry below re-execs
+# this script from inside it.
+cd "$state"
 rm -rf "$work"
 git clone --quiet --branch "$FTL_BRANCH" "$mirror" "$work"
 cd "$work"
@@ -73,31 +111,6 @@ none) ;;
   ;;
 esac
 
-# --- bump -------------------------------------------------------------------
-if [ -n "$FTL_LANE_INPUTS" ]; then
-  # shellcheck disable=SC2086 # intentional word splitting of input names
-  nix flake update $FTL_LANE_INPUTS
-else
-  nix flake update
-fi
-
-bumped=0
-if ! git diff --quiet -- flake.lock; then
-  git commit --quiet "${sign_args[@]}" -m "ftl(${FTL_LANE}): update flake.lock" -- flake.lock
-  bumped=1
-fi
-candidate="$(git rev-parse HEAD)"
-# Tree hash is stable across re-created bump commits (commit hashes are not).
-candidate_tree="$(git rev-parse 'HEAD^{tree}')"
-
-# Skip when this exact candidate content was already processed.
-if [ -f "$status_file" ] && [ "$(jq -r '.candidateTree // ""' "$status_file")" = "$candidate_tree" ] &&
-  [ "${FTL_FORCE:-0}" != 1 ]; then
-  log "candidate tree $candidate_tree already processed; nothing to do"
-  exit 0
-fi
-log "candidate $candidate (lock bumped: $bumped)"
-
 # --- status helpers ---------------------------------------------------------
 attrs_json="$state/attrs-$FTL_LANE.json"
 echo '{}' >"$attrs_json"
@@ -120,7 +133,7 @@ record_attr() { # name system importance host layer status outPath
 finish() { # phase promoted
   local prev_file="$state/prev-status.json"
   [ -f "$status_file" ] && cp "$status_file" "$prev_file" || echo '{}' >"$prev_file"
-  jq -n --arg env "$FTL_REPO_NAME" --arg repo "$FTL_REPO_URL" --arg lane "$FTL_LANE" \
+  jq -n --arg env "$FTL_REPO_NAME" --arg repo "$repo_public" --arg lane "$FTL_LANE" \
     --arg run "$now" --arg candidate "$candidate" --arg candidateTree "$candidate_tree" \
     --arg phase "$1" \
     --argjson bumped "$bumped" --argjson promoted "${2:-false}" \
@@ -152,6 +165,43 @@ finish() { # phase promoted
   return 0
 }
 
+# --- verify the base ---------------------------------------------------------
+# Everything built here ends up under the builder's own signature, so the tip
+# we build on must already carry a trusted one; otherwise the pipeline would
+# turn write access to the forge into a fleet-wide signed deployment.
+base_sha="$(git rev-parse HEAD)"
+if ! verify_commit "$base_sha"; then
+  candidate="$base_sha" candidate_tree="$(git rev-parse 'HEAD^{tree}')" bumped=0
+  notify "REFUSING to build: tip $base_sha of $FTL_BRANCH is not signed by a trusted key"
+  finish "unverified" false
+  exit 1
+fi
+
+# --- bump -------------------------------------------------------------------
+if [ -n "$FTL_LANE_INPUTS" ]; then
+  # shellcheck disable=SC2086 # intentional word splitting of input names
+  nix flake update $FTL_LANE_INPUTS
+else
+  nix flake update
+fi
+
+bumped=0
+if ! git diff --quiet -- flake.lock; then
+  git commit --quiet "${sign_args[@]}" -m "ftl(${FTL_LANE}): update flake.lock" -- flake.lock
+  bumped=1
+fi
+candidate="$(git rev-parse HEAD)"
+# Tree hash is stable across re-created bump commits (commit hashes are not).
+candidate_tree="$(git rev-parse 'HEAD^{tree}')"
+
+# Skip when this exact candidate content was already processed.
+if [ -f "$status_file" ] && [ "$(jq -r '.candidateTree // ""' "$status_file")" = "$candidate_tree" ] &&
+  [ "${FTL_FORCE:-0}" != 1 ]; then
+  log "candidate tree $candidate_tree already processed; nothing to do"
+  exit 0
+fi
+log "candidate $candidate (lock bumped: $bumped)"
+
 # --- evaluate manifest ------------------------------------------------------
 if ! nix eval --json .#ftlManifest >"$state/manifest.json" 2>"$state/eval-error.log"; then
   log "manifest evaluation failed"
@@ -161,19 +211,28 @@ if ! nix eval --json .#ftlManifest >"$state/manifest.json" 2>"$state/eval-error.
 fi
 
 # --- build ------------------------------------------------------------------
+# Paths are signed by nix-daemon at build time (secret-key-files); this
+# process never touches the key. Never publish unsigned paths: without a
+# configured key, build but skip the cache push.
 cache_url=""
 if [ -n "${FTL_CACHE_DIR:-}" ]; then
-  if [ -n "${FTL_CACHE_SECRET:-}" ] && [ ! -r "$FTL_CACHE_SECRET" ]; then
-    # Never publish unsigned paths: build, but skip the cache push.
-    log "cache signing key $FTL_CACHE_SECRET is missing or unreadable; not pushing to the cache"
-    notify "cache signing key missing ($FTL_CACHE_SECRET); builds are not pushed to the cache"
-  else
+  if [ "${FTL_CACHE_SIGNED:-0}" = 1 ]; then
     cache_url="file://${FTL_CACHE_DIR}?compression=zstd&parallel-compression=true&want-mass-query=true&priority=20"
-    [ -n "${FTL_CACHE_SECRET:-}" ] && cache_url="$cache_url&secret-key=${FTL_CACHE_SECRET}"
+  else
+    log "no cache signing key configured (ftl.builder.cache.secretKeyFile); not pushing to the cache"
+    notify "no cache signing key configured; builds are not pushed to the cache"
   fi
 fi
 
+# Sanity check of the daemon-side signing: a green path without any
+# signature means the key setup is broken (clients would refuse it anyway).
+unsigned_ok() { # outPath -> 0 iff the path carries no signature at all
+  nix path-info --json "$1" 2>/dev/null |
+    jq -e '[.. | objects | .signatures? // empty] | all(length == 0)' >/dev/null
+}
+
 required_red=0
+unsigned=0
 for system in $FTL_SYSTEMS; do
   names="$(jq -r --arg s "$system" '(.attrs[$s] // {}) | keys[]' "$state/manifest.json")"
   [ -n "$names" ] || continue
@@ -206,6 +265,10 @@ for system in $FTL_SYSTEMS; do
     if out="$(nix eval --raw ".#checks.$system.$checkName.outPath" 2>/dev/null)"; then
       if nix-store --check-validity "$out" >/dev/null 2>&1; then
         st="ok"
+        if [ -n "$cache_url" ] && unsigned_ok "$out"; then
+          unsigned=$((unsigned + 1))
+          log "$checkName built but carries no signature; check secret-key-files on nix-daemon"
+        fi
       else
         st="build-failed"
       fi
@@ -217,6 +280,7 @@ for system in $FTL_SYSTEMS; do
     fi
   done
 done
+[ "$unsigned" = 0 ] || notify "$unsigned built path(s) carry no signature; nix-daemon's secret-key-files setup is broken"
 
 # --- promote ----------------------------------------------------------------
 # Hosts follow $FTL_BRANCH with comin, which only accepts fast-forwards. The
@@ -226,11 +290,12 @@ done
 promoted=false
 if [ "$required_red" = 1 ]; then
   if [ "$FTL_PROMOTE" = 1 ]; then
-    git push --quiet --force upstream "$candidate:refs/heads/broken/$FTL_LANE/$today"
+    # One ref per lane, force-updated: a bookmark of the last red candidate,
+    # not a growing history of them.
+    git push --quiet --force upstream "$candidate:refs/heads/broken/$FTL_LANE"
   fi
   notify "required build FAILED at $candidate; $FTL_BRANCH not updated"
 elif [ "$FTL_PROMOTE" = 1 ]; then
-  base_sha="$(git rev-parse "origin/$FTL_BRANCH")"
   green_file="$state/layers-green.json"
   [ -f "$green_file" ] || echo '{}' >"$green_file"
 

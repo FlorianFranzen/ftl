@@ -32,10 +32,24 @@ in
       default = 8080;
       description = "HTTP port.";
     };
+    listenAddresses = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [
+        "0.0.0.0"
+        "[::]"
+      ];
+      example = [ "10.0.0.1" ];
+      description = "Addresses nginx binds; narrow this to the LAN interface on multi-homed hosts.";
+    };
     openFirewall = lib.mkOption {
       type = lib.types.bool;
-      default = true;
-      description = "Open the HTTP port in the firewall.";
+      default = false;
+      description = ''
+        Open the HTTP port in the firewall. The cache is plain HTTP (NAR
+        signatures carry the trust) and the status pages list the fleet's
+        hosts, so expose it deliberately. For TLS, extend
+        `services.nginx.virtualHosts."ftl-cache"`.
+      '';
     };
   };
 
@@ -44,16 +58,10 @@ in
       enable = true;
       recommendedGzipSettings = lib.mkDefault false; # NARs are pre-compressed
       virtualHosts."ftl-cache" = {
-        listen = [
-          {
-            addr = "0.0.0.0";
-            port = cfg.port;
-          }
-          {
-            addr = "[::]";
-            port = cfg.port;
-          }
-        ];
+        listen = map (addr: {
+          inherit addr;
+          port = cfg.port;
+        }) cfg.listenAddresses;
         locations."/cache/" = {
           alias = "${cfg.cacheDir}/";
           extraConfig = ''
