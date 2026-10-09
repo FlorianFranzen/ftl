@@ -7,6 +7,7 @@
 }:
 let
   cfg = config.ftl.builder;
+  rootDir = config.ftl.rootDir;
   scripts = import ./scripts.nix { inherit pkgs; };
 
   laneServices = lib.concatMap (
@@ -24,7 +25,10 @@ let
   enabledRemotes = lib.filterAttrs (_: rb: rb.enable) cfg.remoteBuilders;
 in
 {
-  imports = [ ./meta.nix ];
+  imports = [
+    ./meta.nix
+    ./dirs.nix
+  ];
 
   options.ftl.builder = {
     enable = lib.mkEnableOption "the ftl update pipeline";
@@ -42,12 +46,14 @@ in
 
     stateDir = lib.mkOption {
       type = lib.types.path;
-      default = "/var/lib/ftl";
-      description = "Pipeline state (mirrors, worktrees, manifests).";
+      default = "${rootDir}/state";
+      defaultText = lib.literalExpression ''"''${config.ftl.rootDir}/state"'';
+      description = "Private pipeline state (mirrors, worktrees, manifests).";
     };
     statusDir = lib.mkOption {
       type = lib.types.path;
-      default = "/var/lib/ftl-status";
+      default = "${rootDir}/status";
+      defaultText = lib.literalExpression ''"''${config.ftl.rootDir}/status"'';
       description = "Published status JSON (served by ftl.cache).";
     };
     metricsDir = lib.mkOption {
@@ -116,14 +122,19 @@ in
     cache = {
       dir = lib.mkOption {
         type = lib.types.nullOr lib.types.path;
-        default = null;
-        example = "/data/cache";
+        default = "${rootDir}/cache";
+        defaultText = lib.literalExpression ''"''${config.ftl.rootDir}/cache"'';
         description = "file:// binary cache populated by the pipeline (null = no cache push).";
       };
       secretKeyFile = lib.mkOption {
         type = lib.types.nullOr lib.types.path;
-        default = null;
-        description = "NAR signing secret (nix key generate-secret).";
+        default = "${rootDir}/keys/cache.secret";
+        defaultText = lib.literalExpression ''"''${config.ftl.rootDir}/keys/cache.secret"'';
+        description = ''
+          NAR signing secret, readable by the ftl group (create it with
+          `nix key generate-secret`). While it is missing, builds still run
+          but nothing is pushed to the cache.
+        '';
       };
       publicKey = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
@@ -256,6 +267,8 @@ in
     users.groups.${cfg.group} = { };
 
     systemd.tmpfiles.rules = [
+      "d ${rootDir} 0755 root root -"
+      "d ${rootDir}/keys 0750 root ${cfg.group} -"
       "d ${cfg.stateDir} 0750 ${cfg.user} ${cfg.group} -"
       "d ${cfg.statusDir} 0755 ${cfg.user} ${cfg.group} -"
     ]

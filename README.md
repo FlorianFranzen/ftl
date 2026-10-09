@@ -87,6 +87,16 @@ outputs = { self, nixpkgs, ftl, home-manager, ... }@inputs:
   commit once every required host builds. A red layer is pinned in
   `ftl-layers.json`, never blocking.
 - **`ftl.cache`** serves that cache and the status JSON.
+- **Directories:** everything lives under `ftl.rootDir` (default
+  `/var/lib/ftl`, owned by root, 0755):
+  - `state/`: private pipeline state, `ftl` only;
+  - `status/` and `cache/`: published by nginx;
+  - `keys/`: owned by root, readable by group `ftl`; holds `cache.secret`.
+
+  Each path has its own option, e.g. `ftl.builder.cache.dir`. A typical setup
+  mounts a large disk at `<rootDir>/cache` and leaves the rest on the system
+  disk. While `keys/cache.secret` is missing, the pipeline builds but does not
+  push to the cache, and sends an alert.
 - **`ftl.layers`** installs the layers on hosts, verifies the target commit, and
   provides `ftl-layers update | list | rollback <name>`.
 - **`ftl.comin`** connects [comin](https://github.com/nlewo/comin), which deploys

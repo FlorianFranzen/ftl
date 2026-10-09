@@ -40,11 +40,9 @@ pkgs.testers.runNixOSTest {
 
       networking.hostName = lib.mkForce "machine";
 
+      # all paths from the ftl.rootDir defaults
       ftl.builder.enable = true;
-      ftl.cache = {
-        enable = true;
-        cacheDir = "/var/lib/ftl-cache";
-      };
+      ftl.cache.enable = true;
       ftl.client = {
         enable = true;
         statusUrl = "http://localhost:8080/status/fixture.json";
@@ -72,8 +70,23 @@ pkgs.testers.runNixOSTest {
     # builder + cache + client coexist
     machine.wait_for_unit("nginx.service")
     machine.succeed("id ftl")
-    machine.succeed("echo '{}' > /var/lib/ftl-status/fixture.json")
+    machine.succeed("echo '{}' > /var/lib/ftl/status/fixture.json")
     machine.succeed("curl -fsS http://localhost:8080/status/fixture.json")
+    machine.succeed("echo 'StoreDir: /nix/store' > /var/lib/ftl/cache/nix-cache-info")
+    machine.succeed("curl -fsS http://localhost:8080/cache/nix-cache-info")
+
+    # default layout under ftl.rootDir: public status/cache, private state/keys
+    layout = machine.succeed(
+        "stat -c '%n %a %U %G' /var/lib/ftl /var/lib/ftl/state /var/lib/ftl/status /var/lib/ftl/cache /var/lib/ftl/keys"
+    ).split("\n")
+    assert layout[:5] == [
+        "/var/lib/ftl 755 root root",
+        "/var/lib/ftl/state 750 ftl ftl",
+        "/var/lib/ftl/status 755 ftl ftl",
+        "/var/lib/ftl/cache 755 ftl ftl",
+        "/var/lib/ftl/keys 750 root ftl",
+    ], layout
+    machine.fail("sudo -u nobody ls /var/lib/ftl/state")
     machine.succeed("command -v ftl-status")
 
     # flake integration: registry and revision from the flake

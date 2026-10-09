@@ -163,8 +163,14 @@ fi
 # --- build ------------------------------------------------------------------
 cache_url=""
 if [ -n "${FTL_CACHE_DIR:-}" ]; then
-  cache_url="file://${FTL_CACHE_DIR}?compression=zstd&parallel-compression=true&want-mass-query=true&priority=20"
-  [ -n "${FTL_CACHE_SECRET:-}" ] && cache_url="$cache_url&secret-key=${FTL_CACHE_SECRET}"
+  if [ -n "${FTL_CACHE_SECRET:-}" ] && [ ! -r "$FTL_CACHE_SECRET" ]; then
+    # Never publish unsigned paths: build, but skip the cache push.
+    log "cache signing key $FTL_CACHE_SECRET is missing or unreadable; not pushing to the cache"
+    notify "cache signing key missing ($FTL_CACHE_SECRET); builds are not pushed to the cache"
+  else
+    cache_url="file://${FTL_CACHE_DIR}?compression=zstd&parallel-compression=true&want-mass-query=true&priority=20"
+    [ -n "${FTL_CACHE_SECRET:-}" ] && cache_url="$cache_url&secret-key=${FTL_CACHE_SECRET}"
+  fi
 fi
 
 required_red=0
@@ -287,7 +293,7 @@ elif [ "$FTL_PROMOTE" = 1 ]; then
        select(.value.status == "ok") |
        {attr:"\($a)@\(.key)", rev:$rev, date:$date, outPath:.value.outPath} | @json' \
       "$attrs_json" >>"$jsonl"
-    if [ -n "${FTL_CACHE_DIR:-}" ]; then
+    if [ -n "$cache_url" ]; then
       ftl-cache-retention "$FTL_CACHE_DIR" "$jsonl" "$FTL_KEEP_GENERATIONS" ||
         log "cache retention failed (non-fatal)"
     fi

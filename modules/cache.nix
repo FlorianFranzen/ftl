@@ -7,19 +7,24 @@
 }:
 let
   cfg = config.ftl.cache;
+  rootDir = config.ftl.rootDir;
 in
 {
+  imports = [ ./dirs.nix ];
+
   options.ftl.cache = {
     enable = lib.mkEnableOption "the ftl binary cache webserver";
 
     cacheDir = lib.mkOption {
       type = lib.types.path;
-      default = "/data/cache";
+      default = "${rootDir}/cache";
+      defaultText = lib.literalExpression ''"''${config.ftl.rootDir}/cache"'';
       description = "Directory holding the nix binary cache (narinfo/nar layout).";
     };
     statusDir = lib.mkOption {
       type = lib.types.path;
-      default = "/var/lib/ftl-status";
+      default = "${rootDir}/status";
+      defaultText = lib.literalExpression ''"''${config.ftl.rootDir}/status"'';
       description = "Directory holding pipeline status JSON.";
     };
     port = lib.mkOption {

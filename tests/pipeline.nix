@@ -38,10 +38,7 @@ pkgs.testers.runNixOSTest {
           format = "ssh";
           key = "/var/lib/ftl/keys/sign";
         };
-        cache = {
-          dir = "/var/lib/ftl-cache";
-          secretKeyFile = "/var/lib/ftl/keys/cache.secret";
-        };
+        # cache, status and keys use the ftl.rootDir defaults
         repos.fixture = {
           url = "/var/lib/origin.git";
           branch = "main";
@@ -59,22 +56,21 @@ pkgs.testers.runNixOSTest {
 
     def attr_field(attr, field):
         return builder.succeed(
-            f"jq -r '.attrs[\"{attr}\"].{field}' /var/lib/ftl-status/fixture.json"
+            f"jq -r '.attrs[\"{attr}\"].{field}' /var/lib/ftl/status/fixture.json"
         ).strip()
 
     def narinfo_exists(out_path):
         m = re.match(r"/nix/store/([a-z0-9]{32})-", out_path)
         assert m is not None, f"not a store path: {out_path!r}"
-        return builder.execute(f"test -f /var/lib/ftl-cache/{m.group(1)}.narinfo")[0] == 0
+        return builder.execute(f"test -f /var/lib/ftl/cache/{m.group(1)}.narinfo")[0] == 0
 
     builder.wait_for_unit("multi-user.target")
 
     # --- keys and fixture material ------------------------------------------
-    builder.succeed("install -d -o ftl -g ftl -m 0750 /var/lib/ftl/keys")
-    builder.succeed("sudo -u ftl ssh-keygen -q -t ed25519 -N \"\" -f /var/lib/ftl/keys/sign")
+    builder.succeed("ssh-keygen -q -t ed25519 -N \"\" -f /var/lib/ftl/keys/sign && chown ftl /var/lib/ftl/keys/sign")
     builder.succeed(
         "nix key generate-secret --key-name vm-test-1 > /tmp/c.sec",
-        "install -o ftl -g ftl -m 0400 /tmp/c.sec /var/lib/ftl/keys/cache.secret",
+        "install -o root -g ftl -m 0440 /tmp/c.sec /var/lib/ftl/keys/cache.secret",
     )
     builder.succeed("mkdir -p /var/lib/fixture-dep && echo v1 > /var/lib/fixture-dep/data")
 
@@ -123,7 +119,7 @@ pkgs.testers.runNixOSTest {
     builder.succeed(f"git -C /var/lib/origin.git merge-base --is-ancestor {main1} {main2}")
     assert attr_field("nixos-layer-gaming", "status") == "build-failed"
     assert pins_at("main") == {"gaming": main1}, pins_at("main")
-    assert builder.succeed("jq -r .promoted /var/lib/ftl-status/fixture.json").strip() == "true"
+    assert builder.succeed("jq -r .promoted /var/lib/ftl/status/fixture.json").strip() == "true"
 
     # retention (keepGenerations = 1): alpha's old generation is pruned, the
     # pinned gaming layer survives.
@@ -140,7 +136,7 @@ pkgs.testers.runNixOSTest {
         "git -C /var/lib/origin.git for-each-ref refs/heads/broken | grep -q broken"
     )
     assert attr_field("nixos-beta", "status") == "build-failed"
-    assert builder.succeed("jq -r .promoted /var/lib/ftl-status/fixture.json").strip() == "false"
+    assert builder.succeed("jq -r .promoted /var/lib/ftl/status/fixture.json").strip() == "false"
 
     # --- run 4: unchanged candidate -> early exit -----------------------------
     builder.succeed("systemctl start ftl-pipeline-fixture-default.service")
