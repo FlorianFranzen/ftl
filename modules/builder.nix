@@ -106,7 +106,11 @@ in
       key = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
-        description = "SSH private key path (ssh) or GnuPG key id (openpgp, e.g. a smartcard-backed key).";
+        description = ''
+          ssh: path of an SSH private key, or `key::<public key>` for a key held by the agent
+          at `sshAuthSock` (e.g. on a smartcard). openpgp: GnuPG key id (e.g. a
+          smartcard-backed key).
+        '';
       };
       name = lib.mkOption {
         type = lib.types.str;
@@ -167,7 +171,23 @@ in
     deployKeyFile = lib.mkOption {
       type = lib.types.nullOr lib.types.path;
       default = null;
-      description = "SSH key used to push refs to the environment repos (readable by the ftl user).";
+      description = ''
+        SSH key used to push refs to the environment repos (readable by the ftl user).
+        Leave it null to authenticate through `sshAuthSock` instead.
+      '';
+    };
+
+    sshAuthSock = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "/run/piv-agent/agent.sock";
+      description = ''
+        ssh-agent socket (`SSH_AUTH_SOCK`) for keys that must not live in files, e.g. on a
+        smartcard. The pipeline uses it to push (when `deployKeyFile` is null) and to sign
+        commits (`signing.format = "ssh"` with `signing.key = "key::<public key>"`), and
+        nix-daemon uses it for remote builders without `sshKey`. The agent must be
+        reachable by the ftl user; root (nix-daemon) can always connect.
+      '';
     };
 
     cache = {
@@ -195,6 +215,21 @@ in
         type = lib.types.nullOr lib.types.str;
         default = null;
         description = "Matching public key; when set, this host substitutes from its own cache.";
+      };
+      signer.command = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = lib.literalExpression "config.services.piv-cache-signer.requestCommand";
+        description = ''
+          Command that signs what the pipeline pushed, for keys nix-daemon cannot hold (e.g.
+          on a smartcard). After each build the pipeline writes the closure of every green
+          path, one store path per line, to a queue file and runs
+          `<command> <cache dir> <queue file>` as the ftl user; the command must add `Sig:`
+          lines to the narinfos in the cache (`nix store sign --store file://… --stdin`
+          does, as does nix-piv's cache signer). It may run alongside `secretKeyFile`
+          (paths then carry both signatures). A failure is reported, not fatal: unsigned
+          narinfos are refused by clients that require this key.
+        '';
       };
     };
 
@@ -270,6 +305,7 @@ in
             sshKey = lib.mkOption {
               type = lib.types.nullOr lib.types.path;
               default = null;
+              description = "SSH key nix-daemon uses for this builder; null = the agent at `sshAuthSock`.";
             };
             systems = lib.mkOption {
               type = lib.types.listOf lib.types.str;
@@ -353,6 +389,7 @@ in
     ];
 
     nix.distributedBuilds = lib.mkIf (enabledRemotes != { }) true;
+
     nix.buildMachines = lib.mapAttrsToList (_: rb: {
       inherit (rb)
         hostName
@@ -401,7 +438,14 @@ in
             // lib.optionalAttrs (cfg.signing.gnupgHome != null) { GNUPGHOME = cfg.signing.gnupgHome; }
             // lib.optionalAttrs (cfg.deployKeyFile != null) { FTL_DEPLOY_KEY = cfg.deployKeyFile; }
             // lib.optionalAttrs (cfg.cache.dir != null) { FTL_CACHE_DIR = cfg.cache.dir; }
-            // lib.optionalAttrs (cfg.cache.secretKeyFile != null) { FTL_CACHE_SIGNED = "1"; }
+            // lib.optionalAttrs (cfg.cache.secretKeyFile != null || cfg.cache.signer.command != null) {
+              FTL_CACHE_SIGNED = "1";
+            }
+            // lib.optionalAttrs (cfg.cache.secretKeyFile != null) { FTL_CACHE_DAEMON_SIGNED = "1"; }
+            // lib.optionalAttrs (cfg.cache.signer.command != null) {
+              FTL_CACHE_SIGN_COMMAND = cfg.cache.signer.command;
+            }
+            // lib.optionalAttrs (cfg.sshAuthSock != null) { SSH_AUTH_SOCK = cfg.sshAuthSock; }
             // lib.optionalAttrs (cfg.verify.mode != "none") { FTL_VERIFY_MODE = cfg.verify.mode; }
             // lib.optionalAttrs (cfg.verify.allowedSignersFile != null) {
               FTL_ALLOWED_SIGNERS = toString cfg.verify.allowedSignersFile;
@@ -458,7 +502,11 @@ in
           };
         }
       ) laneServices
-    );
+    )
+    # remote builders without sshKey authenticate through the agent
+    // lib.optionalAttrs (cfg.sshAuthSock != null) {
+      nix-daemon.environment.SSH_AUTH_SOCK = cfg.sshAuthSock;
+    };
 
     systemd.timers = builtins.listToAttrs (
       map (

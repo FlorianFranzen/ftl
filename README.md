@@ -124,9 +124,19 @@ deploys. Keep these in mind when setting it up.
     configured. The file must exist before the configuration is activated;
     nix-daemon fails local builds while it is missing;
   - the deploy key and the commit signing key are used by `ftl` itself, so
-    they are exposed to the same risk. Prefer a smartcard-backed OpenPGP key
-    (`signing.format = "openpgp"`, `signing.gnupgHome`) and a deploy key the
-    forge restricts to fast-forwards of the deployed branch.
+    they are exposed to the same risk. Prefer keys that cannot be read at all:
+    a smartcard behind an ssh-agent (`ftl.builder.sshAuthSock`, with
+    `deployKeyFile = null` and `signing.key = "key::<public key>"`), or a
+    smartcard-backed OpenPGP key (`signing.format = "openpgp"`,
+    `signing.gnupgHome`); and a deploy key the forge restricts to fast-forwards
+    of the deployed branch. With an agent, code running as `ftl` can still ask
+    for signatures while it runs, but cannot take the key away;
+  - keys nix-daemon cannot hold (e.g. on a smartcard) sign the cache through
+    `ftl.builder.cache.signer.command` after each push, ideally a command that
+    hands the work to a root service (e.g. nix-piv's `piv-cache-signer`) so the
+    card PIN stays out of `ftl`'s reach. It can run next to `secretKeyFile`;
+    paths then carry both signatures. Remote builders without `sshKey` use the
+    agent too.
 - **The builder's signature says "built green on top of a trusted tip".**
   With `ftl.builder.verify` the pipeline refuses to build on a branch tip that
   is not signed by a listed key (humans, CI, and the builder itself for its own

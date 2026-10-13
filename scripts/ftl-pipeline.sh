@@ -5,8 +5,11 @@
 #
 # Required: FTL_REPO_NAME FTL_REPO_URL FTL_STATE_DIR FTL_STATUS_DIR FTL_SYSTEMS
 # Optional: FTL_BRANCH (main) FTL_LANE (default) FTL_LANE_INPUTS ("" = all)
-#           FTL_CACHE_DIR FTL_CACHE_SIGNED (1 when nix-daemon signs built paths;
-#           nothing is pushed otherwise) FTL_PROMOTE (0) FTL_KEEP_GENERATIONS (5)
+#           FTL_CACHE_DIR FTL_CACHE_SIGNED (1 when pushed paths get signed, by
+#           nix-daemon or the sign command; nothing is pushed otherwise)
+#           FTL_CACHE_DAEMON_SIGNED (1 when nix-daemon signs at build time)
+#           FTL_CACHE_SIGN_COMMAND (run as `cmd <cache dir> <queue file>` after
+#           each build) FTL_PROMOTE (0) FTL_KEEP_GENERATIONS (5)
 #           FTL_SIGN_FORMAT (none|ssh|openpgp) FTL_SIGN_KEY FTL_GIT_NAME FTL_GIT_EMAIL
 #           FTL_VERIFY_MODE (none|ssh|gpg) FTL_ALLOWED_SIGNERS FTL_VERIFY_GPG_HOME
 #           FTL_DEPLOY_KEY FTL_KNOWN_HOSTS FTL_METRICS_FILE FTL_NTFY_URL
@@ -211,15 +214,16 @@ if ! nix eval --json .#ftlManifest >"$state/manifest.json" 2>"$state/eval-error.
 fi
 
 # --- build ------------------------------------------------------------------
-# Paths are signed by nix-daemon at build time (secret-key-files); this
-# process never touches the key. Never publish unsigned paths: without a
-# configured key, build but skip the cache push.
+# Paths are signed by nix-daemon at build time (secret-key-files) and/or by
+# FTL_CACHE_SIGN_COMMAND after the push (keys nix-daemon cannot hold, e.g. on a
+# smartcard); this process never touches a key. Never publish unsigned paths:
+# without either, build but skip the cache push.
 cache_url=""
 if [ -n "${FTL_CACHE_DIR:-}" ]; then
   if [ "${FTL_CACHE_SIGNED:-0}" = 1 ]; then
     cache_url="file://${FTL_CACHE_DIR}?compression=zstd&parallel-compression=true&want-mass-query=true&priority=20"
   else
-    log "no cache signing key configured (ftl.builder.cache.secretKeyFile); not pushing to the cache"
+    log "no cache signing configured (ftl.builder.cache.secretKeyFile or .signer.command); not pushing to the cache"
     notify "no cache signing key configured; builds are not pushed to the cache"
   fi
 fi
@@ -233,6 +237,7 @@ unsigned_ok() { # outPath -> 0 iff the path carries no signature at all
 
 required_red=0
 unsigned=0
+green_outs=()
 for system in $FTL_SYSTEMS; do
   names="$(jq -r --arg s "$system" '(.attrs[$s] // {}) | keys[]' "$state/manifest.json")"
   [ -n "$names" ] || continue
@@ -265,7 +270,8 @@ for system in $FTL_SYSTEMS; do
     if out="$(nix eval --raw ".#checks.$system.$checkName.outPath" 2>/dev/null)"; then
       if nix-store --check-validity "$out" >/dev/null 2>&1; then
         st="ok"
-        if [ -n "$cache_url" ] && unsigned_ok "$out"; then
+        green_outs+=("$out")
+        if [ -n "$cache_url" ] && [ "${FTL_CACHE_DAEMON_SIGNED:-0}" = 1 ] && unsigned_ok "$out"; then
           unsigned=$((unsigned + 1))
           log "$checkName built but carries no signature; check secret-key-files on nix-daemon"
         fi
@@ -281,6 +287,22 @@ for system in $FTL_SYSTEMS; do
   done
 done
 [ "$unsigned" = 0 ] || notify "$unsigned built path(s) carry no signature; nix-daemon's secret-key-files setup is broken"
+
+# --- sign the push with keys nix-daemon cannot hold -----------------------
+# The queue is the closure of every green path: that is what --copy-to pushed.
+# The command gets the cache directory and the queue file; it may skip paths
+# that are already signed. Failure is reported but not fatal: clients requiring
+# this key refuse the unsigned narinfos, everything else keeps working.
+if [ -n "$cache_url" ] && [ -n "${FTL_CACHE_SIGN_COMMAND:-}" ] && [ "${#green_outs[@]}" -gt 0 ]; then
+  sign_queue="$state/sign-queue-$FTL_LANE"
+  nix-store --query --requisites "${green_outs[@]}" | sort -u >"$sign_queue"
+  log "signing $(wc -l <"$sign_queue") path(s) with the cache sign command"
+  # shellcheck disable=SC2086 # the command may carry arguments
+  if ! $FTL_CACHE_SIGN_COMMAND "$FTL_CACHE_DIR" "$sign_queue" >"$state/sign-$FTL_LANE.log" 2>&1; then
+    log "cache sign command failed: $(tail -c 500 "$state/sign-$FTL_LANE.log")"
+    notify "cache sign command FAILED: $(tail -c 300 "$state/sign-$FTL_LANE.log")"
+  fi
+fi
 
 # --- promote ----------------------------------------------------------------
 # Hosts follow $FTL_BRANCH with comin, which only accepts fast-forwards. The

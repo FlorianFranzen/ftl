@@ -56,5 +56,6 @@ in
   modules = import ./modules.nix args;
   layers = import ./layers.nix { inherit pkgs ftl nixpkgs; };
   pipeline = import ./pipeline.nix { inherit pkgs ftl nixpkgs; };
+  pipeline-agent = import ./pipeline-agent.nix { inherit pkgs ftl nixpkgs; };
   cache = import ./cache.nix { inherit pkgs ftl nixpkgs; };
 }
