@@ -1,7 +1,6 @@
 {
   pkgs,
   profiles,
-  homes,
   static,
   ...
 }:
@@ -20,5 +19,4 @@
   # static files are only used where the config says so
   environment.etc."marker".source = static.marker;
 
-  home-manager.users.alice = homes.desktop-dark;
 }

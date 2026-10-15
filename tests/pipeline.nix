@@ -35,7 +35,7 @@ pkgs.testers.runNixOSTest {
       # deployments push over the network).
       systemd.services.ftl-pipeline-fixture-default.serviceConfig.ReadWritePaths = [ "/var/lib/origin.git" ];
 
-      ftl.builder = {
+      fleet.builder = {
         enable = true;
         promote = true;
         signing = {
@@ -48,7 +48,7 @@ pkgs.testers.runNixOSTest {
           allowedSignersFile = "/etc/ftl/allowed_signers";
         };
         # nix-daemon signs with this root-only key; cache and status use the
-        # ftl.rootDir defaults
+        # fleet.rootDir defaults
         cache.secretKeyFile = "/var/lib/ftl/keys/cache.secret";
         repos.fixture = {
           url = "/var/lib/origin.git";

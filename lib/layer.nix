@@ -1,26 +1,38 @@
 # mkLayer: build an ftl layer - an independently versioned set of packages
-# (kind "apps") or packages plus systemd services (kind "services") that a
+# (kind "packages") or packages plus systemd units (kind "units") that a
 # host installs as its own Nix profile under /nix/var/nix/profiles/layers/.
 #
 # Layout of the result:
 #   bin/, share/, ...                 merged packages (buildEnv)
-#   lib/systemd/system/<unit>         generated service units (services kind)
+#   lib/systemd/system/<unit>         generated service units (units kind)
 #   lib/systemd/system/<t>.wants/<u>  install links for WantedBy targets
 #   share/ftl-layer/meta.json         { name, kind, units }
+#
+# The kinds were called "apps" and "services" (and the units attribute
+# "services") before fleet services existed; the old names are still accepted
+# with a warning.
 {
   pkgs,
   name,
-  kind ? "apps",
+  kind ? "packages",
   # list of packages, or a function pkgs -> list
   packages ? [ ],
-  # services.<name> = {
+  # units.<name> = {
   #   description ? name; exec; environment ? { }; after ? [ ];
   #   wantedBy ? [ "multi-user.target" ]; serviceConfig ? { };
   # }
-  services ? { },
+  units ? { },
+  services ? null,
 }:
 let
   lib = pkgs.lib;
+  kinds = import ./kinds.nix lib;
+  kind' = kinds.normalize "layer '${name}'" kind;
+  units' =
+    if services == null then
+      units
+    else
+      lib.warn "ftl: layer '${name}': `services` is called `units` now" (units // services);
 
   packages' = if builtins.isFunction packages then packages pkgs else packages;
 
@@ -54,9 +66,9 @@ let
       WantedBy=${lib.concatStringsSep " " wantedBy}
     '';
 
-  unitNames = map (n: "${n}.service") (builtins.attrNames services);
+  unitNames = map (n: "${n}.service") (builtins.attrNames units');
 
-  units = pkgs.runCommand "ftl-layer-${name}-units" { } ''
+  unitFiles = pkgs.runCommand "ftl-layer-${name}-units" { } ''
     mkdir -p $out/lib/systemd/system
     ${lib.concatStrings (
       lib.mapAttrsToList (n: svc: ''
@@ -65,27 +77,24 @@ let
           mkdir -p $out/lib/systemd/system/${target}.wants
           ln -s ../${n}.service $out/lib/systemd/system/${target}.wants/${n}.service
         '') (svc.wantedBy or [ "multi-user.target" ])}
-      '') services
+      '') units'
     )}
   '';
 
   meta = pkgs.writeTextDir "share/ftl-layer/meta.json" (
     builtins.toJSON {
-      inherit name kind;
+      inherit name;
+      kind = kind';
       units = unitNames;
     }
   );
 in
-assert lib.assertMsg (builtins.elem kind [
-  "apps"
-  "services"
-]) "ftl: layer '${name}' has invalid kind '${kind}'";
 assert lib.assertMsg (
-  kind == "services" || services == { }
-) "ftl: layer '${name}' defines services but is not of kind \"services\"";
+  kind' == "units" || units' == { }
+) "ftl: layer '${name}' defines units but is not of kind \"units\"";
 pkgs.buildEnv {
   name = "ftl-layer-${name}";
-  paths = packages' ++ [ meta ] ++ lib.optional (kind == "services") units;
+  paths = packages' ++ [ meta ] ++ lib.optional (kind' == "units") unitFiles;
   pathsToLink = [ "/" ];
   ignoreCollisions = false;
 }

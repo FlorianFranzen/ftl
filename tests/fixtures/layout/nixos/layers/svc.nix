@@ -1,7 +1,7 @@
 {
-  kind = "services";
+  kind = "units";
   packages = pkgs: [ pkgs.hello-ftl ];
-  services.ftl-demo = {
+  units.ftl-demo = {
     description = "ftl demo";
     exec = "/run/current-system/sw/bin/sleep infinity";
   };

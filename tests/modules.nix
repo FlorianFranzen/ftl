@@ -24,7 +24,7 @@ let
       username = "alice";
     };
   };
-  alpha = f.nixosConfigurations.alpha.ftlArgs;
+  alpha = f.nixosConfigurations.alpha.fleetArgs;
 in
 pkgs.testers.runNixOSTest {
   name = "ftl-modules";
@@ -39,11 +39,13 @@ pkgs.testers.runNixOSTest {
       imports = alpha.modules;
 
       networking.hostName = lib.mkForce "machine";
+      # alpha's service state would wait for a disk this VM does not have
+      fleet.state = lib.mkForce { };
 
-      # all paths from the ftl.rootDir defaults
-      ftl.builder.enable = true;
-      ftl.cache.enable = true;
-      ftl.client = {
+      # all paths from the fleet.rootDir defaults
+      fleet.builder.enable = true;
+      fleet.cache.enable = true;
+      fleet.client = {
         enable = true;
         statusUrl = "http://localhost:8080/status/fixture.json";
       };
@@ -75,7 +77,7 @@ pkgs.testers.runNixOSTest {
     machine.succeed("echo 'StoreDir: /nix/store' > /var/lib/ftl/cache/nix-cache-info")
     machine.succeed("curl -fsS http://localhost:8080/cache/nix-cache-info")
 
-    # default layout under ftl.rootDir: public status/cache, private state/keys
+    # default layout under fleet.rootDir: public status/cache, private state/keys
     layout = machine.succeed(
         "stat -c '%n %a %U %G' /var/lib/ftl /var/lib/ftl/state /var/lib/ftl/status /var/lib/ftl/cache /var/lib/ftl/keys"
     ).split("\n")

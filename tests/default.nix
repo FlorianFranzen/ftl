@@ -47,6 +47,7 @@ in
   unit-packages = import ./unit/packages.nix args;
   unit-home = import ./unit/home.nix args;
   unit-nixos = import ./unit/nixos.nix args;
+  unit-users = import ./unit/users.nix args;
 
   # 2. each family through mkFlake, in isolation; 3. everything together
   flake-isolated = import ./flake/isolated.nix args;

@@ -12,6 +12,6 @@
       fsType = "ext4";
     };
     system.stateVersion = "26.05";
-    ftl.layers.repo = "file:///dev/null";
+    fleet.layers.repo = "file:///dev/null";
   };
 }

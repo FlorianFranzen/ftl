@@ -1,4 +1,4 @@
-# ftl.builder: the update/build/promote pipeline host.
+# fleet.builder: the update/build/promote pipeline host.
 {
   config,
   lib,
@@ -6,8 +6,8 @@
   ...
 }:
 let
-  cfg = config.ftl.builder;
-  rootDir = config.ftl.rootDir;
+  cfg = config.fleet.builder;
+  rootDir = config.fleet.rootDir;
   scripts = import ./scripts.nix { inherit pkgs; };
 
   laneServices = lib.concatMap (
@@ -42,7 +42,7 @@ in
     ./dirs.nix
   ];
 
-  options.ftl.builder = {
+  options.fleet.builder = {
     enable = lib.mkEnableOption "the ftl update pipeline";
 
     user = lib.mkOption {
@@ -59,14 +59,14 @@ in
     stateDir = lib.mkOption {
       type = lib.types.path;
       default = "${rootDir}/state";
-      defaultText = lib.literalExpression ''"''${config.ftl.rootDir}/state"'';
+      defaultText = lib.literalExpression ''"''${config.fleet.rootDir}/state"'';
       description = "Private pipeline state (mirrors, worktrees, manifests).";
     };
     statusDir = lib.mkOption {
       type = lib.types.path;
       default = "${rootDir}/status";
-      defaultText = lib.literalExpression ''"''${config.ftl.rootDir}/status"'';
-      description = "Published status JSON (served by ftl.cache).";
+      defaultText = lib.literalExpression ''"''${config.fleet.rootDir}/status"'';
+      description = "Published status JSON (served by fleet.cache).";
     };
     metricsDir = lib.mkOption {
       type = lib.types.nullOr lib.types.path;
@@ -194,7 +194,7 @@ in
       dir = lib.mkOption {
         type = lib.types.nullOr lib.types.path;
         default = "${rootDir}/cache";
-        defaultText = lib.literalExpression ''"''${config.ftl.rootDir}/cache"'';
+        defaultText = lib.literalExpression ''"''${config.fleet.rootDir}/cache"'';
         description = "file:// binary cache populated by the pipeline (null = no cache push).";
       };
       secretKeyFile = lib.mkOption {
@@ -341,19 +341,19 @@ in
     assertions = [
       {
         assertion = cfg.signing.format == "none" || cfg.signing.key != null;
-        message = "ftl.builder.signing.key must be set when signing is enabled";
+        message = "fleet.builder.signing.key must be set when signing is enabled";
       }
       {
         assertion = cfg.verify.mode != "ssh" || cfg.verify.allowedSignersFile != null;
-        message = "ftl.builder.verify.allowedSignersFile must be set for verify.mode = \"ssh\"";
+        message = "fleet.builder.verify.allowedSignersFile must be set for verify.mode = \"ssh\"";
       }
       {
         assertion = cfg.verify.mode != "gpg" || cfg.verify.gpgHome != null;
-        message = "ftl.builder.verify.gpgHome must be set for verify.mode = \"gpg\"";
+        message = "fleet.builder.verify.gpgHome must be set for verify.mode = \"gpg\"";
       }
       {
         assertion = lib.all (rb: rb.publicHostKey != null) (builtins.attrValues enabledRemotes);
-        message = "ftl.builder.remoteBuilders.<name>.publicHostKey must be set: outputs of an unauthenticated remote would be signed and promoted";
+        message = "fleet.builder.remoteBuilders.<name>.publicHostKey must be set: outputs of an unauthenticated remote would be signed and promoted";
       }
     ];
 

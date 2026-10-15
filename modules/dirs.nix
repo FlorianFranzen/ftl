@@ -3,7 +3,7 @@
 # setting (or one mount per subdirectory) relocates everything.
 { lib, ... }:
 {
-  options.ftl.rootDir = lib.mkOption {
+  options.fleet.rootDir = lib.mkOption {
     type = lib.types.path;
     default = "/var/lib/ftl";
     description = ''

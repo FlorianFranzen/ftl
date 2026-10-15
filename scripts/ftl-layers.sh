@@ -7,7 +7,7 @@
 #   ftl-layers list             show installed layers and their revisions
 #   ftl-layers rollback <name>  switch a layer back to its previous generation
 #
-# Environment (baked in by the ftl.layers NixOS module):
+# Environment (baked in by the fleet.layers NixOS module):
 #   FTL_REPO_URL  FTL_SYSTEM  FTL_LAYERS ("name:kind ...")
 #   FTL_STATE_DIR (/var/lib/ftl-layers)  FTL_PROFILE_DIR (/nix/var/nix/profiles/layers)
 #   FTL_KEEP_GENERATIONS  FTL_VERIFY_MODE (none|ssh|gpg)  FTL_ALLOWED_SIGNERS
@@ -34,6 +34,9 @@ notify() {
   curl -fsS -m 10 -H "Title: ftl-layers: $(hostname)" -d "$1" "$FTL_NTFY_URL" >/dev/null ||
     log "ntfy notification failed"
 }
+
+# units layers were called "services" layers; old meta.json files still say so.
+is_units() { [ "$1" = units ] || [ "$1" = services ]; }
 
 kind_of() { # name
   local entry
@@ -138,7 +141,7 @@ cmd_update() {
       continue
     fi
 
-    if [ "$kind" = services ]; then
+    if is_units "$kind"; then
       reload=1
       while read -r u; do
         [ -n "$u" ] || continue
@@ -203,7 +206,7 @@ cmd_rollback() {
   nix-env --profile "$FTL_PROFILE_DIR/$name" --rollback
   after="$(readlink -f "$FTL_PROFILE_DIR/$name")"
   write_state "$name" "rollback" "$after" "rolled-back"
-  if [ "$kind" = services ]; then
+  if is_units "$kind"; then
     local -a units=()
     while read -r u; do
       if [ -n "$u" ]; then units+=("$u"); fi

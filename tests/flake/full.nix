@@ -57,7 +57,9 @@ check "flake-full" (
       expr = builtins.attrNames f;
       expected = [
         "checks"
+        "fleet"
         "ftlManifest"
+        "ftlPeers"
         "homeConfigurations"
         "homeModules"
         "homeProfiles"
@@ -66,6 +68,7 @@ check "flake-full" (
         "nixosLayers"
         "nixosModules"
         "nixosProfiles"
+        "nixosServices"
         "overlays"
         "packages"
       ];
@@ -129,7 +132,9 @@ check "flake-full" (
     testManifestKinds = {
       expr = lib.unique (
         lib.sort lib.lessThan (
-          lib.concatMap (s: map (e: e.kind) (builtins.attrValues s)) (builtins.attrValues f.ftlManifest.attrs)
+          lib.concatMap (s: map (e: e.kind) (builtins.attrValues s)) (
+            builtins.attrValues f.fleet.manifest.attrs
+          )
         )
       );
       expected = [
@@ -155,6 +160,23 @@ check "flake-full" (
       };
     };
 
+    # the fleet output carries the host data and the manifest
+    testFleetOutput = {
+      expr = {
+        names = builtins.attrNames f.fleet;
+        alpha = f.fleet.hosts.alpha.fqdn;
+      };
+      expected = {
+        names = [
+          "hosts"
+          "manifest"
+          "services"
+          "users"
+        ];
+        alpha = "alpha.example.org";
+      };
+    };
+
     testPassthru = {
       expr = builtins.attrNames f.packages.x86_64-linux;
       expected = [
@@ -172,7 +194,8 @@ check "flake-full" (
     # layout: renamed folder (unknown root folders are ignored otherwise)
     testRenamedFolder = {
       expr =
-        (mk { layout.static = "alt-static"; }).nixosConfigurations.alpha.config.environment.etc.marker.source;
+        (mk { layout.static = "alt-static"; })
+        .nixosConfigurations.alpha.config.environment.etc.marker.source;
       expected = fixture + "/alt-static/marker.txt";
     };
   }

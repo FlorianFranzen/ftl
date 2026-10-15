@@ -1,6 +1,6 @@
-# ftl.client: binary cache and gc wiring shared by every host of an ftl
+# fleet.client: binary cache and gc wiring shared by every host of an ftl
 # environment. Deployment itself is comin's job (base system) and
-# ftl.layers' job (layers).
+# fleet.layers' job (layers).
 {
   config,
   lib,
@@ -8,7 +8,7 @@
   ...
 }:
 let
-  cfg = config.ftl.client;
+  cfg = config.fleet.client;
   scripts = import ./scripts.nix { inherit pkgs; };
 
   ftl-status = pkgs.writeShellScriptBin "ftl-status" ''
@@ -21,7 +21,7 @@ in
 {
   imports = [ ./meta.nix ];
 
-  options.ftl.client = {
+  options.fleet.client = {
     enable = lib.mkEnableOption "ftl client wiring";
 
     substituters = lib.mkOption {

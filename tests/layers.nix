@@ -1,7 +1,7 @@
 # Host-side layers test: ftl-layers installs apps and services layers from a
 # local repo, honours ftl-layers.json pins, refuses bad pins and unsigned
 # targets, keeps the old generation when a build fails, rolls back, and the
-# ftl.comin hook mirrors comin's generation into the system profile.
+# fleet.comin hook mirrors comin's generation into the system profile.
 #
 # The fixture layers are raw derivations (no nixpkgs evaluation inside the VM);
 # their tools come from store paths that are part of the VM closure.
@@ -35,7 +35,7 @@ let
               mkdir -p $out/bin $out/share/ftl-layer
               printf '#!${sh}\necho tools-''${toolsVer}\n' > $out/bin/ftl-tool
               chmod +x $out/bin/ftl-tool
-              echo '{"name":"tools","kind":"apps","units":[]}' > $out/share/ftl-layer/meta.json
+              echo '{"name":"tools","kind":"packages","units":[]}' > $out/share/ftl-layer/meta.json
             ''';
             svc = mk "ftl-layer-svc" (if svcBroken then "echo broken; exit 1" else '''
               u=$out/lib/systemd/system
@@ -78,12 +78,12 @@ pkgs.testers.runNixOSTest {
       };
 
       environment.etc."ftl-fixture/flake.nix".source = fixtureFlake;
-      environment.etc."ftl-hook".source = config.ftl.comin.hook;
+      environment.etc."ftl-hook".source = config.fleet.comin.hook;
 
-      ftl.layers = {
+      fleet.layers = {
         installed = {
-          tools.kind = "apps";
-          svc.kind = "services";
+          tools.kind = "packages";
+          svc.kind = "units";
         };
         repo = "/var/lib/env.git";
         timer.enable = false;
@@ -94,7 +94,7 @@ pkgs.testers.runNixOSTest {
       };
 
       # comin itself is not part of this test; its hook is driven directly.
-      ftl.comin.syncSystemProfile = true;
+      fleet.comin.syncSystemProfile = true;
     };
 
   testScript = ''

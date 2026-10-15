@@ -1,4 +1,4 @@
 {
-  kind = "apps";
+  kind = "packages";
   packages = pkgs: [ pkgs.supertuxkart ];
 }
