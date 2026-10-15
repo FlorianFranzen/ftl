@@ -80,6 +80,69 @@ check "unit-nixos" (
       };
     };
 
+    # free-form host.nix attributes become peer data, reserved ones are not repeated
+    testPeers = {
+      expr = n.peers;
+      expected = {
+        alpha = {
+          name = "alpha";
+          system = "x86_64-linux";
+          importance = "required";
+          layers = [
+            "tools"
+            "svc"
+          ];
+          fqdn = "alpha.example.org";
+          roles = [ "web" ];
+        };
+        beta = {
+          name = "beta";
+          system = "aarch64-linux";
+          importance = "optional";
+          layers = [ "tools" ];
+        };
+        gamma = {
+          name = "gamma";
+          system = "x86_64-linux";
+          importance = "required";
+          layers = [ ];
+        };
+      };
+    };
+
+    # every host sees all peers (itself included), and can use it in imports
+    testPeersArg = {
+      expr =
+        (ftl.lib.mkNixos {
+          src = fixture + "/nixos";
+          inherit nixpkgs;
+          sharedModules = [ hmStub.nixosModules.home-manager ];
+          hosts.gamma.modules = [
+            (
+              { peers, lib, ... }:
+              {
+                imports = lib.optional (peers ? alpha) { environment.etc.peer.text = peers.alpha.fqdn; };
+              }
+            )
+          ];
+        }).nixosConfigurations.gamma.config.environment.etc.peer.text;
+      expected = "alpha.example.org";
+    };
+
+    # explicit host specs carry data too, and `name` is reserved
+    testPeersExplicit = {
+      expr =
+        (ftl.lib.mkNixos {
+          inherit nixpkgs;
+          hosts.delta.address = "192.0.2.4";
+        }).peers.delta.address;
+      expected = "192.0.2.4";
+    };
+    testPeersReservedName = {
+      expr = failsWith { delta.name = "other"; };
+      expected = true;
+    };
+
     testModulesEverywhere = {
       expr = map (h: (cfg h).fixture.common) [
         "alpha"

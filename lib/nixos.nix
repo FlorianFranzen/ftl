@@ -1,13 +1,21 @@
 # mkNixos: nixos/ folder -> NixOS configurations, modules, profiles, layers.
 #
 #   nixos/hosts/<name>/*.nix  modules of host <name>; host.nix is metadata
-#                             { system?; importance?; layers?; }, not a module
+#                             { system?; importance?; layers?; ... }, not a
+#                             module. Any further attributes are free-form host
+#                             data, visible to every host via `peers`.
 #   nixos/modules/**.nix      imported into every host (nixosModules)
 #   nixos/profiles/**.nix     opt-in modules, available as `profiles` argument
 #   nixos/layers/<name>.nix   layer definitions { kind; packages; services; }
 #
 # Hosts and layers can also be given (or overridden) explicitly. Every host
 # gets ftl's own NixOS modules (all disabled by default) and the meta module.
+#
+# Every host also receives the `peers` module argument: all hosts' metadata,
+# `peers.<name> = { name; system; importance; layers; } // <free-form data>`.
+# It is built from host.nix alone, without evaluating any configuration, so
+# modules can use it anywhere (even in imports) without infinite recursion,
+# e.g. to derive mesh endpoints, scrape targets or DNS records from the host list.
 {
   src ? null,
   nixpkgs,
@@ -84,6 +92,15 @@ let
     "ignored"
   ];
 
+  # Attributes of a host spec that ftl interprets; everything else is data.
+  reservedHostAttrs = [
+    "name"
+    "system"
+    "importance"
+    "modules"
+    "layers"
+  ];
+
   normalizeHost =
     hostName: spec:
     let
@@ -92,9 +109,12 @@ let
         importance = spec.importance or "required";
         modules = spec.modules or [ ];
         layers = spec.layers or [ ];
+        data = builtins.removeAttrs spec reservedHostAttrs;
       };
       unknownLayers = lib.filter (l: !(layers' ? ${l})) host.layers;
     in
+    assert lib.assertMsg (!(spec ? name))
+      "ftl: host '${hostName}' sets reserved attribute 'name' (the directory name is the host name)";
     assert lib.assertMsg (builtins.elem host.importance importances)
       "ftl: host '${hostName}' has invalid importance '${host.importance}'";
     assert lib.assertMsg (unknownLayers == [ ])
@@ -104,6 +124,16 @@ let
     host;
 
   hosts' = builtins.mapAttrs normalizeHost hostSpecs;
+
+  # Every host's metadata, as seen by every host, itself included (`peers` argument).
+  peers = builtins.mapAttrs (
+    hostName: host:
+    host.data
+    // {
+      name = hostName;
+      inherit (host) system importance layers;
+    }
+  ) hosts';
 
   # Systems each layer is needed for (only where a non-ignored host uses it).
   layerSystems = builtins.mapAttrs (
@@ -168,7 +198,12 @@ let
   ];
 
   specialArgs' = specialArgs // {
-    inherit profiles homes static;
+    inherit
+      profiles
+      homes
+      static
+      peers
+      ;
   };
 
   # The exact nixosSystem arguments of every host (also attached to each
@@ -238,6 +273,7 @@ assert builtins.all builtins.isAttrs (builtins.attrValues hosts');
     nixosLayers
     checks
     manifestEntries
+    peers
     ;
   hosts = hosts';
 }

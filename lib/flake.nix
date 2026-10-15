@@ -3,7 +3,8 @@
 # Every root folder is one output family, handled by its own mk* function:
 #
 #   pkgs/    mkPackages  overlays.default, packages, legacyPackages
-#   nixos/   mkNixos     nixosConfigurations, nixosModules, nixosProfiles, nixosLayers
+#   nixos/   mkNixos     nixosConfigurations, nixosModules, nixosProfiles, nixosLayers,
+#                        ftlPeers
 #   home/    mkHome      homeModules, homeProfiles, homeConfigurations
 #   static/  mkStatic    the `static` module argument (no outputs)
 #
@@ -195,6 +196,8 @@ let
         nixosProfiles
         nixosLayers
         ;
+      # host metadata of all hosts (the `peers` module argument)
+      ftlPeers = nixosOut.peers;
     })
     (lib.optionalAttrs (checks != { }) { inherit checks; })
     { ftlManifest = manifest; }

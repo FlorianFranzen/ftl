@@ -9,7 +9,7 @@ family, handled by its own `mk*` function that only looks at that folder;
 | Root folder | Contents | Function | Flake outputs |
 |---|---|---|---|
 | `pkgs/` | `<name>/package.nix` (nixpkgs by-name shape; patches, scripts and `test.nix` next to it); optional `overlay.nix` (overrides, kernel modules, anything else; may use any other subfolder); optional `config.nix` (nixpkgs config, e.g. the unfree allow-list) | `mkPackages` | `overlays.default`, `packages.<sys>` (the `<name>/package.nix` packages available on that system), `legacyPackages.<sys>` (the full package set, shared by everything else) |
-| `nixos/` | `hosts/<name>/*.nix` (modules of a host; `host.nix` is metadata `{ system; importance; layers; }`, not a module); `modules/**.nix` (imported into every host); `profiles/**.nix` (opt-in via the `profiles` argument); `layers/<name>.nix` (layers, see below) | `mkNixos` | `nixosConfigurations`, `nixosModules`, `nixosProfiles`, `nixosLayers.<sys>.<name>`; checks `nixos-<host>`, `nixos-layer-<name>` |
+| `nixos/` | `hosts/<name>/*.nix` (modules of a host; `host.nix` is metadata `{ system; importance; layers; … }`, not a module; further attributes are free-form host data); `modules/**.nix` (imported into every host); `profiles/**.nix` (opt-in via the `profiles` argument); `layers/<name>.nix` (layers, see below) | `mkNixos` | `nixosConfigurations`, `nixosModules`, `nixosProfiles`, `nixosLayers.<sys>.<name>`, `ftlPeers`; checks `nixos-<host>`, `nixos-layer-<name>` |
 | `home/` | `modules/**.nix` (shared into every configuration); `profiles/<dir>/*.nix` (building blocks); `variants/*.nix` | `mkHome` | `homeModules`, `homeProfiles`, `homeConfigurations.<name>`, `legacyPackages.<sys>.homeConfigurations.<name>`; checks `home-<name>` |
 | `static/` | any files and folders (wallpapers, complete config dirs, …) | `mkStatic` | none; available as the module argument `static` |
 
@@ -30,7 +30,26 @@ Missing folders are skipped. Folder names can be changed with
     `home-manager` input exists;
   - the specialArgs `profiles` (`nixos/profiles` merged over
     `nixos.extraProfiles`; local profiles win), `homes` (the home
-    configurations as modules) and `static`.
+    configurations as modules), `static` and `peers`.
+- **Peers.** `peers.<host>` is every host's metadata, as seen by every host
+  (itself included):
+  `{ name; system; importance; layers; }` plus any free-form attributes of
+  its `host.nix` (addresses, keys, roles, …). It is built from `host.nix`
+  alone, never from an evaluated configuration, so modules may use it
+  anywhere, including `imports`, to derive peers, scrape targets or DNS
+  records from the host list. The same data is the `ftlPeers` output, for
+  anything outside a NixOS configuration (DNS, scripts, install tooling).
+
+  ```nix
+  # nixos/hosts/web/host.nix
+  { importance = "required"; fqdn = "web.example.org"; wireguard.ip = "10.0.0.2"; }
+
+  # nixos/modules/mesh.nix
+  { peers, lib, ... }: {
+    networking.hosts = lib.mapAttrs' (_: h: lib.nameValuePair h.wireguard.ip [ h.name ])
+      (lib.filterAttrs (_: h: h ? wireguard) peers);
+  }
+  ```
 - **Homes** are a matrix: `home.bases.<base> = [ profile dirs ]` times
   `home/variants/*`, named `<base>-<variant>`. A base includes only the
   *direct* `.nix` files of each listed dir. Configurations are built for every

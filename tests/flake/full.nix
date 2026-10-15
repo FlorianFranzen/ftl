@@ -58,6 +58,7 @@ check "flake-full" (
       expected = [
         "checks"
         "ftlManifest"
+        "ftlPeers"
         "homeConfigurations"
         "homeModules"
         "homeProfiles"

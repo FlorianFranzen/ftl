@@ -42,6 +42,7 @@ check "flake-isolated" (
       expected = [
         "checks"
         "ftlManifest"
+        "ftlPeers"
         "nixosConfigurations"
         "nixosLayers"
         "nixosModules"
