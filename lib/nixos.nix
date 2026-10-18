@@ -5,7 +5,10 @@
 #                             module. Any further attributes are free-form host
 #                             data, visible to every host via `fleet.hosts`.
 #                             ssh.pub and initrd.pub next to it are the host's
-#                             SSH host keys (`keys.ssh`, `keys.initrd`).
+#                             SSH host keys (`keys.ssh`, `keys.initrd`), sops.age
+#                             an age recipient used instead of the SSH key
+#                             (`keys.age`), secrets.yaml its secret store and
+#                             identity.yaml its private host keys (admins only).
 #   nixos/modules/**.nix      imported into every host (nixosModules)
 #   nixos/profiles/**.nix     opt-in modules, available as `profiles` argument
 #   nixos/layers/<name>.nix   layer definitions { kind; packages; units; }
@@ -33,10 +36,18 @@
 # that into accounts.
 #
 # A service's modules get the `service` argument: its metadata, `role` (the
-# roles this host has in it) and `dir` (its folder), so a module can say
-# `service.port` or `service.dir + "/secrets.yaml"` without knowing where it is.
+# roles this host has in it), `dir` (its folder) and `sopsFile` (its secret
+# store, <dir>/secrets.yaml), so a module can say `service.port` or
+# `sops.secrets.x.sopsFile = service.sopsFile` without knowing where it is.
+#
+# Every store's recipients follow from the layout (`sops` below, the
+# `fleet.sops` output): a host's store is for the host and the admins, its
+# identity for the admins, a service's store for its hosts, the admins and the
+# users listing it, a user's store for that user.
 {
   src ? null,
+  # the repository root, for the paths in `sops` (defaults to the parent of src)
+  root ? null,
   nixpkgs,
   name ? "nixos",
   repo ? null,
@@ -65,6 +76,7 @@ let
   loader = import ./loader.nix;
   kinds = import ./kinds.nix lib;
 
+  root' = if root != null then root else if src != null then dirOf src else null;
   dir = sub: if src == null then null else src + "/${sub}";
   exists = sub: src != null && builtins.pathExists (dir sub);
 
@@ -82,14 +94,23 @@ let
         let
           hostDir = dir "hosts/${hostName}";
           meta = if builtins.pathExists (hostDir + "/host.nix") then import (hostDir + "/host.nix") else { };
-          key = file: lib.optionalAttrs (builtins.pathExists (hostDir + "/${file}")) {
-            ${lib.removeSuffix ".pub" file} = lib.trim (builtins.readFile (hostDir + "/${file}"));
-          };
-          keys = (meta.keys or { }) // key "ssh.pub" // key "initrd.pub";
+          # the first line of a key file that is not a comment
+          key =
+            file: attr:
+            let
+              lines = lib.filter (l: l != "" && !lib.hasPrefix "#" l) (
+                map lib.trim (lib.splitString "\n" (builtins.readFile (hostDir + "/${file}")))
+              );
+            in
+            lib.optionalAttrs (builtins.pathExists (hostDir + "/${file}") && lines != [ ]) {
+              ${attr} = builtins.head lines;
+            };
+          keys = (meta.keys or { }) // key "ssh.pub" "ssh" // key "initrd.pub" "initrd" // key "sops.age" "age";
         in
         meta
         // lib.optionalAttrs (keys != { }) { inherit keys; }
         // {
+          dir = hostDir;
           modules = loader.collectPaths (
             loader.loadTree {
               dir = hostDir;
@@ -217,6 +238,7 @@ let
         serviceInfo.${serviceName}
         // {
           inherit (service) dir;
+          sopsFile = if service.dir != null then service.dir + "/secrets.yaml" else null;
           role = rolesOf (if hostName != null then hostName else args.config.fleet.meta.host) service;
         };
       withArg =
@@ -327,6 +349,66 @@ let
       home-manager.users = lib.mapAttrs (_: u: homes.${u.home}) withHome;
     };
 
+  # --- secret stores ---------------------------------------------------------
+  # Who can read which store: recipients are sops keys (pgp fingerprints, age
+  # recipients) and SSH host keys still to be converted with ssh-to-age.
+  recipientsOf =
+    {
+      hostNames ? [ ],
+      userNames ? [ ],
+    }:
+    let
+      hostKeys = map (h: peers.${h}.keys or { }) hostNames;
+      userKeys = map (u: users'.${u}.keys) userNames;
+      ofHosts = f: lib.concatMap f hostKeys;
+    in
+    {
+      pgp = lib.unique (lib.concatMap (k: k.pgp) userKeys);
+      age = lib.unique (lib.concatMap (k: k.age) userKeys ++ ofHosts (k: lib.optional (k ? age) k.age));
+      ssh = lib.unique (ofHosts (k: lib.optional (k ? ssh && !(k ? age)) k.ssh));
+    };
+
+  admins = builtins.attrNames (lib.filterAttrs (_: u: u.admin) users');
+
+  store =
+    kind: owner: dir: file: recipients:
+    lib.optional (dir != null && recipients != { pgp = [ ]; age = [ ]; ssh = [ ]; }) {
+      inherit kind owner recipients;
+      path = lib.removePrefix (toString root' + "/") (toString dir) + "/${file}";
+    };
+
+  stores =
+    lib.concatLists (
+      lib.mapAttrsToList (
+        hostName: host:
+        store "host" hostName host.dir "secrets.yaml" (recipientsOf {
+          hostNames = [ hostName ];
+          userNames = admins;
+        })
+        ++ store "identity" hostName host.dir "identity.yaml" (recipientsOf { userNames = admins; })
+      ) hosts'
+    )
+    ++ lib.concatLists (
+      lib.mapAttrsToList (
+        serviceName: service:
+        store "service" serviceName service.dir "secrets.yaml" (recipientsOf {
+          hostNames = service.hosts;
+          userNames = lib.unique (
+            admins ++ builtins.attrNames (lib.filterAttrs (_: u: builtins.elem serviceName u.services) users')
+          );
+        })
+      ) services'
+    )
+    ++ lib.concatLists (
+      lib.mapAttrsToList (
+        userName: user: store "user" userName user.dir "secrets.yaml" (recipientsOf { userNames = [ userName ]; })
+      ) users'
+    );
+
+  sops = {
+    stores = lib.sort (a: b: a.path < b.path) stores;
+  };
+
   # --- layers ----------------------------------------------------------------
   discoveredLayers = builtins.mapAttrs (_: import) (loader.loadTreeIfExists { dir = dir "layers"; });
   layers' = discoveredLayers // layers;
@@ -346,6 +428,7 @@ let
     "layers"
     "services"
     "users"
+    "dir"
   ];
 
   normalizeHost =
@@ -362,6 +445,7 @@ let
         );
         services = builtins.attrNames ownServices;
         users = builtins.attrNames (usersOf hostName);
+        dir = spec.dir or null;
         data = builtins.removeAttrs spec reservedHostAttrs;
       };
       unknownLayers = lib.filter (l: !(layers' ? ${l})) (spec.layers or [ ]);
@@ -452,6 +536,10 @@ let
         fleet.layers.installed = lib.genAttrs host.layers (l: {
           kind = layerKind l;
         });
+        fleet.secrets = lib.mkIf (host.dir != null) {
+          file = lib.mkIf (builtins.pathExists (host.dir + "/secrets.yaml")) (host.dir + "/secrets.yaml");
+          ageKeyFile = lib.mkIf (peers.${hostName} ? keys.age) "/var/lib/sops-nix/key.txt";
+        };
         networking.hostName = lib.mkDefault hostName;
         nixpkgs.hostPlatform = lib.mkDefault host.system;
       };
@@ -465,6 +553,7 @@ let
     ../modules/comin.nix
     ../modules/state.nix
     ../modules/access.nix
+    ../modules/secrets.nix
   ];
 
   # The fleet as every host sees it; `self` is added per host below.
@@ -566,6 +655,7 @@ assert builtins.all builtins.isAttrs (builtins.attrValues users');
     manifestEntries
     peers
     fleet
+    sops
     ;
   hosts = hosts';
   services = serviceInfo;

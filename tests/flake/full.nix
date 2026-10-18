@@ -171,6 +171,7 @@ check "flake-full" (
           "hosts"
           "manifest"
           "services"
+          "sops"
           "users"
         ];
         alpha = "alpha.example.org";

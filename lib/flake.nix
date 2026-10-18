@@ -37,6 +37,8 @@ args@{
   home ? { },
   # user specs merged over users/ (see mkUsers)
   users ? { },
+  # sops: extraRules, creation rules appended to the generated .sops.yaml
+  sops ? { },
   ...
 }:
 let
@@ -56,6 +58,7 @@ let
     "nixos"
     "home"
     "users"
+    "sops"
   ];
   passthru = builtins.removeAttrs args knownArgs;
 
@@ -138,6 +141,7 @@ let
     else
       import ./nixos.nix {
         src = folder "nixos";
+        root = src;
         inherit
           nixpkgs
           name
@@ -154,6 +158,7 @@ let
         homes = if homeOut != null then homeOut.modules else { };
         sharedModules =
           lib.optional (homeOut != null && homeManager != null) homeManager.nixosModules.home-manager
+          ++ lib.optional (inputs ? sops-nix) inputs.sops-nix.nixosModules.sops
           ++ (nixos.sharedModules or [ ])
           ++ [ integration ];
       };
@@ -216,6 +221,10 @@ let
       fleet.hosts = nixosOut.peers;
       fleet.services = nixosOut.services;
       fleet.users = nixosOut.users;
+      # every secret store and its recipients, for `fleetl secrets sync`
+      fleet.sops = nixosOut.sops // {
+        extraRules = sops.extraRules or [ ];
+      };
       ftlPeers = lib.warn "ftl: the `ftlPeers` output is `fleet.hosts` now" nixosOut.peers;
     })
     (lib.optionalAttrs (checks != { }) { inherit checks; })

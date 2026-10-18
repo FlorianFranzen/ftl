@@ -8,11 +8,13 @@ let
 
   fixture = ./fixtures/layout;
   hmStub = import ./stubs/home-manager.nix { inherit lib; };
+  sopsStub = import ./stubs/sops-nix.nix;
 
   # inputs as a consumer flake of the fixture would pass them
   inputs = {
     inherit nixpkgs;
     home-manager = hmStub;
+    sops-nix = sopsStub;
     self = {
       outPath = fixture;
       shortRev = "abc1234";
@@ -35,6 +37,7 @@ let
       nixpkgs
       fixture
       hmStub
+      sopsStub
       inputs
       check
       ;
