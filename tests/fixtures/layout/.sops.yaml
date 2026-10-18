@@ -1,0 +1,49 @@
+# Written by `fleetl secrets sync` from the fleet's layout (see fleet.sops).
+# Who may read a store follows from users/, nixos/hosts/ and nixos/services/;
+# edit those, not this file.
+creation_rules:
+  - path_regex: ^nixos/hosts/alpha/identity\.yaml$
+    key_groups:
+      - age:
+          - age18jlex7sq6yufhk48ljzs5uzxrtazqrchddanezf7w5gl48nccv7sflpg7l
+  - path_regex: ^nixos/hosts/alpha/secrets\.yaml$
+    key_groups:
+      - age:
+          - age18jlex7sq6yufhk48ljzs5uzxrtazqrchddanezf7w5gl48nccv7sflpg7l
+          - age1xfyxhut43fh8sr94cp0efdp3s2k326g64nuqdtfxs8ff6e8p4p6s8h08er
+  - path_regex: ^nixos/hosts/beta/identity\.yaml$
+    key_groups:
+      - age:
+          - age18jlex7sq6yufhk48ljzs5uzxrtazqrchddanezf7w5gl48nccv7sflpg7l
+  - path_regex: ^nixos/hosts/beta/secrets\.yaml$
+    key_groups:
+      - age:
+          - age1880pyzlyypv0cmec6e3tgwww9tgum9cywqn5743flkdz6krlxy2sksedxt
+          - age18jlex7sq6yufhk48ljzs5uzxrtazqrchddanezf7w5gl48nccv7sflpg7l
+  - path_regex: ^nixos/hosts/gamma/identity\.yaml$
+    key_groups:
+      - age:
+          - age18jlex7sq6yufhk48ljzs5uzxrtazqrchddanezf7w5gl48nccv7sflpg7l
+  - path_regex: ^nixos/hosts/gamma/secrets\.yaml$
+    key_groups:
+      - age:
+          - age18jlex7sq6yufhk48ljzs5uzxrtazqrchddanezf7w5gl48nccv7sflpg7l
+  - path_regex: ^nixos/services/mesh/secrets\.yaml$
+    key_groups:
+      - age:
+          - age1880pyzlyypv0cmec6e3tgwww9tgum9cywqn5743flkdz6krlxy2sksedxt
+          - age18jlex7sq6yufhk48ljzs5uzxrtazqrchddanezf7w5gl48nccv7sflpg7l
+          - age1xfyxhut43fh8sr94cp0efdp3s2k326g64nuqdtfxs8ff6e8p4p6s8h08er
+  - path_regex: ^nixos/services/web/secrets\.yaml$
+    key_groups:
+      - age:
+          - age18jlex7sq6yufhk48ljzs5uzxrtazqrchddanezf7w5gl48nccv7sflpg7l
+          - age1xfyxhut43fh8sr94cp0efdp3s2k326g64nuqdtfxs8ff6e8p4p6s8h08er
+  - path_regex: ^users/alice/secrets\.yaml$
+    key_groups:
+      - age:
+          - age18jlex7sq6yufhk48ljzs5uzxrtazqrchddanezf7w5gl48nccv7sflpg7l
+  - path_regex: ^tests/.*\.yaml$
+    key_groups:
+      - age:
+          - age1test

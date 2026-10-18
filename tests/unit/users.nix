@@ -28,10 +28,10 @@ check "unit-users" (
       expr = u.alice.keys;
       expected = {
         ssh = [
-          "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAlice000000000000000000000000000000000000000 alice@laptop"
+          "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHW437gdXlD8N84nBJqtbi36N1kia4RepapKRaxqlor6 alice"
         ];
         pgp = [ ];
-        age = [ "age1alice00000000000000000000000000000000000000000000000000000" ];
+        age = [ "age18jlex7sq6yufhk48ljzs5uzxrtazqrchddanezf7w5gl48nccv7sflpg7l" ];
       };
     };
 

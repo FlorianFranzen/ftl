@@ -56,6 +56,7 @@ check "flake-full" (
     testOutputs = {
       expr = builtins.attrNames f;
       expected = [
+        "apps"
         "checks"
         "fleet"
         "ftlManifest"
@@ -147,13 +148,13 @@ check "flake-full" (
     testChecks = {
       expr = builtins.mapAttrs (_: builtins.attrNames) f.checks;
       expected = {
-        x86_64-linux = homeNames ++ [
+        x86_64-linux = [ "fleet-sops" ] ++ homeNames ++ [
           "nixos-alpha"
           "nixos-gamma"
           "nixos-layer-svc"
           "nixos-layer-tools"
         ];
-        aarch64-linux = homeNames ++ [
+        aarch64-linux = [ "fleet-sops" ] ++ homeNames ++ [
           "nixos-beta"
           "nixos-layer-tools"
         ];
@@ -182,6 +183,7 @@ check "flake-full" (
       expr = builtins.attrNames f.packages.x86_64-linux;
       expected = [
         "extra"
+        "fleetl"
         "hello-ftl"
         "unfree-ftl"
       ];

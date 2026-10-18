@@ -56,7 +56,10 @@ in
   flake-isolated = import ./flake/isolated.nix args;
   flake-full = import ./flake/full.nix args;
 
-  # 4. VM tests
+  # 4. the fleet-sops check of the fixture: fleetl renders its committed .sops.yaml
+  cli = import ./cli.nix args;
+
+  # 5. VM tests
   modules = import ./modules.nix args;
   layers = import ./layers.nix { inherit pkgs ftl nixpkgs; };
   pipeline = import ./pipeline.nix { inherit pkgs ftl nixpkgs; };

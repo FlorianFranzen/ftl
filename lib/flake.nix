@@ -182,9 +182,48 @@ let
     if hasPkgs then packages.pkgsFor system // withHomes else withHomes
   );
 
+  # --- fleetl and the .sops.yaml check -------------------------------------------
+  hasFleet = nixosOut != null;
+  sopsOut = if hasFleet then nixosOut.sops // { extraRules = sops.extraRules or [ ]; } else null;
+  fleetlFor = system: (import ../modules/scripts.nix { pkgs = packages.pkgsFor system; }).fleetl;
+
+  # .sops.yaml must be what `fleetl secrets sync` writes for the layout.
+  sopsCheck =
+    system:
+    let
+      pkgs = packages.pkgsFor system;
+    in
+    pkgs.runCommand "fleet-sops"
+      {
+        nativeBuildInputs = [
+          (fleetlFor system)
+          pkgs.diffutils
+        ];
+        stores = builtins.toJSON sopsOut;
+        passAsFile = [ "stores" ];
+        committed = if builtins.pathExists (src + "/.sops.yaml") then src + "/.sops.yaml" else "";
+      }
+      ''
+        fleetl secrets render <"$storesPath" >generated.yaml
+        if [ -z "$committed" ]; then
+          echo "no .sops.yaml in the repository; run fleetl secrets sync" >&2
+          exit 1
+        fi
+        if ! diff -u "$committed" generated.yaml; then
+          echo ".sops.yaml is stale; run fleetl secrets sync" >&2
+          exit 1
+        fi
+        touch "$out"
+      '';
+
+  fleetChecks = lib.optionalAttrs (hasFleet && sopsOut.stores != [ ]) (
+    lib.genAttrs systems (system: { fleet-sops = sopsCheck system; })
+  );
+
   checks = lib.foldl' lib.recursiveUpdate { } [
     (if nixosOut != null then nixosOut.checks else { })
     (if homeOut != null then lib.filterAttrs (_: c: c != { }) homeOut.checks else { })
+    fleetChecks
   ];
 
   manifest = import ./manifest.nix {
@@ -222,9 +261,16 @@ let
       fleet.services = nixosOut.services;
       fleet.users = nixosOut.users;
       # every secret store and its recipients, for `fleetl secrets sync`
-      fleet.sops = nixosOut.sops // {
-        extraRules = sops.extraRules or [ ];
-      };
+      fleet.sops = sopsOut;
+      # the admin's command line (nix run .#fleetl -- ...), ftl as alias
+      packages = lib.genAttrs systems (system: { fleetl = fleetlFor system; });
+      apps = lib.genAttrs systems (system: {
+        fleetl = {
+          type = "app";
+          program = lib.getExe (fleetlFor system);
+          meta.description = "The fleet from the admin's machine: secrets, hosts, users";
+        };
+      });
       ftlPeers = lib.warn "ftl: the `ftlPeers` output is `fleet.hosts` now" nixosOut.peers;
     })
     (lib.optionalAttrs (checks != { }) { inherit checks; })

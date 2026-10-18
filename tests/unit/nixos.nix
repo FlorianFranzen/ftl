@@ -115,8 +115,8 @@ check "unit-nixos" (
             "bob"
           ];
           keys = {
-            ssh = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAlphaHost0000000000000000000000000000000000000";
-            initrd = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAlphaInitrd00000000000000000000000000000000000";
+            ssh = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO7pFvyv5FcmP7vj/Q0OeeOBecLE9K/75Qch2uR6eRSl";
+            initrd = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKODezmkKcdWZ4strBZey4HXGUlIdwQZ5CtDzbAzqvMZ";
           };
           fqdn = "alpha.example.org";
           roles = [ "web" ];
@@ -128,7 +128,7 @@ check "unit-nixos" (
           layers = [ "tools" ];
           services = [ "mesh" ];
           users = [ "alice" ];
-          keys.age = "age1beta000000000000000000000000000000000000000000000000000000";
+          keys.age = "age1880pyzlyypv0cmec6e3tgwww9tgum9cywqn5743flkdz6krlxy2sksedxt";
         };
         gamma = {
           name = "gamma";
@@ -253,7 +253,7 @@ check "unit-nixos" (
           uid = 1000;
           extraGroups = [ "wheel" ];
           keys = [
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAlice000000000000000000000000000000000000000 alice@laptop"
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHW437gdXlD8N84nBJqtbi36N1kia4RepapKRaxqlor6 alice"
           ];
         };
         bobGroups = [ "video" ];
@@ -309,9 +309,9 @@ check "unit-nixos" (
       }) n.sops.stores;
       expected =
         let
-          alice = "age1alice00000000000000000000000000000000000000000000000000000";
-          alphaSsh = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAlphaHost0000000000000000000000000000000000000";
-          betaAge = "age1beta000000000000000000000000000000000000000000000000000000";
+          alice = "age18jlex7sq6yufhk48ljzs5uzxrtazqrchddanezf7w5gl48nccv7sflpg7l";
+          alphaSsh = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO7pFvyv5FcmP7vj/Q0OeeOBecLE9K/75Qch2uR6eRSl";
+          betaAge = "age1880pyzlyypv0cmec6e3tgwww9tgum9cywqn5743flkdz6krlxy2sksedxt";
           r = age: ssh: {
             pgp = [ ];
             inherit age ssh;

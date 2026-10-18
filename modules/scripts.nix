@@ -47,6 +47,37 @@ rec {
     text = builtins.readFile ../scripts/ftl-layers.sh;
   };
 
+  # The admin's command line: fleetl, and ftl as its alias.
+  fleetl =
+    let
+      script = pkgs.writeShellApplication {
+        name = "fleetl";
+        runtimeInputs = with pkgs; [
+          nix
+          git
+          jq
+          yq-go
+          sops
+          ssh-to-age
+          age
+          openssh
+          gnupg
+          nixos-anywhere
+          coreutils
+          diffutils
+          gnused
+          gawk
+        ];
+        text = builtins.readFile ../scripts/fleetl.sh;
+      };
+    in
+    pkgs.symlinkJoin {
+      name = "fleetl";
+      paths = [ script ];
+      postBuild = "ln -s fleetl $out/bin/ftl";
+      meta.mainProgram = "fleetl";
+    };
+
   ftl-status = pkgs.writeShellApplication {
     name = "ftl-status";
     runtimeInputs = with pkgs; [
