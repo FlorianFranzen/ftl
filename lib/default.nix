@@ -9,6 +9,7 @@ in
   mkHome = import ./home.nix;
   mkStatic = import ./static.nix;
   mkUsers = import ./users.nix;
+  mkDeploy = import ./deploy.nix;
   mkLayer = import ./layer.nix;
   mkManifest = import ./manifest.nix;
 }

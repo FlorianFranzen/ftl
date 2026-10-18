@@ -1,10 +1,10 @@
 # ftl — fleet template library
 
-ftl turns a repository with a standard folder layout into the flake outputs of a
-fleet of NixOS hosts, and adds an optional fleet-update pipeline on top. Every root folder is one output
-family, handled by its own `mk*` function that only looks at that folder;
-`ftl.lib.mkFlake` runs on the repository root and delegates to them. Each
-`mk*` function can also be used on its own.
+ftl turns a repository with a standard folder layout into the flake outputs
+of a fleet of NixOS hosts, and adds an optional fleet-update pipeline on top.
+Every root folder is one output family, handled by its own `mk*` function that
+only looks at that folder; `ftl.lib.mkFlake` runs on the repository root and
+delegates to them. Each `mk*` function can also be used on its own.
 
 | Root folder | Contents | Function | Flake outputs |
 |---|---|---|---|
@@ -109,6 +109,12 @@ Missing folders are skipped. Folder names can be changed with
 
   The check `fleet-sops` fails when `.sops.yaml` is not what `secrets sync`
   would write.
+- **Deploying** with deploy-rs: `ftl.lib.mkDeploy { hosts = self.fleet.hosts;
+  inherit (self) nixosConfigurations; deploy = inputs.deploy-rs; sshUser = "admin"; }`
+  is the `deploy` output, one node per host, reached by its `fqdn` (or
+  `address = h: …`) and checked against its `ssh.pub`, so stale DNS or
+  known_hosts entries never get in the way. comin (`fleet.comin`) is the
+  pull-based alternative.
 - **Static files** are a lookup, not an installer. A file's key is its name
   without its last extension: `static/wallpapers/nixish-dark.png` becomes
   `static.wallpapers.nixish-dark`. Every directory also has an `outPath`, so
@@ -149,7 +155,7 @@ Three things live under `nixos/` besides hosts, and they are easy to mix up:
 
 | | unit of | delivered by |
 |---|---|---|
-| **service** (`nixos/services/<name>/`) | placement: where something runs, with its data (and, later, its secrets and state) | the hosts' NixOS configurations: modules, rebuilt with the system |
+| **service** (`nixos/services/<name>/`) | placement: where something runs, with its data, secrets and state | the hosts' NixOS configurations: modules, rebuilt with the system |
 | **layer** (`nixos/layers/<name>.nix`) | independent delivery: an update without a system rebuild | a Nix profile under `/nix/var/nix/profiles/layers/` |
 | **profile** (`nixos/profiles/**.nix`) | reuse: a building block | imported by hosts and services through `profiles` |
 
@@ -273,15 +279,20 @@ deploys. Keep these in mind when setting it up.
 
 `nix flake check` runs, fully offline:
 
-- `unit-loader`, `unit-static`, `unit-packages`, `unit-home`, `unit-nixos`:
-  each `mk*` called directly on its folder of `tests/fixtures/layout`;
+- `unit-loader`, `unit-static`, `unit-packages`, `unit-home`, `unit-nixos`,
+  `unit-users`, `unit-deploy`: each `mk*` called directly on its folder of
+  `tests/fixtures/layout`;
 - `flake-isolated`: each family through `mkFlake` with all other folders
   disabled;
 - `flake-full`: all families together (overlay and config in hosts and layers,
   homes in hosts, `static` everywhere, manifest, per-system checks,
   pass-through, renamed folders);
+- `cli`: the fixture's `.sops.yaml` is what `fleetl secrets render` makes of
+  its layout (the `fleet-sops` check);
 - VM tests:
   - `modules`: a `mkFlake` host with every ftl module enabled;
+  - `state-btrfs`, `state-zfs`: `fleet.state` on an empty disk, then a
+    filesystem or pool;
   - `layers`: layer install, update, pins and rollback, plus the comin hook;
   - `pipeline`: fast-forward, layer pinning, broken builds, retention,
     daemon-signed cache, refusal of an unsigned branch tip, lane locking;

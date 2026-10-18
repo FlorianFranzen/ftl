@@ -51,6 +51,7 @@ in
   unit-home = import ./unit/home.nix args;
   unit-nixos = import ./unit/nixos.nix args;
   unit-users = import ./unit/users.nix args;
+  unit-deploy = import ./unit/deploy.nix args;
 
   # 2. each family through mkFlake, in isolation; 3. everything together
   flake-isolated = import ./flake/isolated.nix args;
@@ -61,6 +62,14 @@ in
 
   # 5. VM tests
   modules = import ./modules.nix args;
+  state-btrfs = import ./state.nix {
+    inherit pkgs ftl;
+    backend = "btrfs";
+  };
+  state-zfs = import ./state.nix {
+    inherit pkgs ftl;
+    backend = "zfs";
+  };
   layers = import ./layers.nix { inherit pkgs ftl nixpkgs; };
   pipeline = import ./pipeline.nix { inherit pkgs ftl nixpkgs; };
   pipeline-agent = import ./pipeline-agent.nix { inherit pkgs ftl nixpkgs; };

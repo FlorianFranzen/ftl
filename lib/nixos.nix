@@ -315,7 +315,9 @@ let
       "ftl: user '${userName}' names undefined services: ${toString unknownServices}";
     assert lib.assertMsg (user.home == null || homes ? ${user.home})
       "ftl: user '${userName}' wants home configuration '${toString user.home}', which does not exist";
-    user;
+    lib.warnIf (user.hosts != [ ] && user.keys.ssh == [ ])
+      "ftl: user '${userName}' has an account on ${toString (builtins.length user.hosts)} host(s) but no SSH key (ssh.pub)"
+      user;
 
   users' = builtins.mapAttrs normalizeUser users;
 
