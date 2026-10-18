@@ -3,6 +3,11 @@
 #   home/modules/**.nix        shared into every configuration (homeModules)
 #   home/profiles/<dir>/*.nix  building blocks; a base lists profile dirs and
 #                              includes only their direct .nix files
+#   home/profiles/<dir>/nixos.nix
+#                              not a home module: the NixOS side that profile
+#                              cannot do without (a PAM entry, portals, fonts),
+#                              imported into a host that gives a user a
+#                              configuration built from the dir (`companions`)
 #   home/variants/*.nix        one configuration per base x variant
 #
 # Configurations are named <base>-<variant> (or <base> without variants) and
@@ -34,13 +39,16 @@ let
   variantFiles =
     if variants == null then { } else loader.loadTreeIfExists { dir = src + "/${variants}"; };
 
-  # Direct .nix files of a profile dir ("desktop/light" -> its files only).
+  profileDir =
+    dir: lib.attrByPath (lib.splitString "/" dir) (throw "ftl: home: no profile dir '${dir}'") homeProfiles;
+
+  # Direct .nix files of a profile dir ("desktop/light" -> its files only),
+  # its nixos.nix aside.
   directFiles =
-    dir:
-    let
-      node = lib.attrByPath (lib.splitString "/" dir) (throw "ftl: home: no profile dir '${dir}'") homeProfiles;
-    in
-    builtins.attrValues (lib.filterAttrs (_: v: !builtins.isAttrs v) node);
+    dir: builtins.attrValues (lib.filterAttrs (n: v: !builtins.isAttrs v && n != "nixos") (profileDir dir));
+
+  # The NixOS modules the dirs of a base need on the host.
+  companionFiles = dir: lib.optional ((profileDir dir) ? nixos) (profileDir dir).nixos;
 
   mkModule =
     imports:
@@ -54,6 +62,20 @@ let
     };
 
   baseFiles = builtins.mapAttrs (_: dirs: builtins.concatMap directFiles dirs) bases;
+  baseCompanions = builtins.mapAttrs (_: dirs: lib.unique (builtins.concatMap companionFiles dirs)) bases;
+
+  # configuration name -> the NixOS modules its base needs
+  companions =
+    if variantFiles == { } then
+      baseCompanions
+    else
+      builtins.listToAttrs (
+        lib.concatLists (
+          lib.mapAttrsToList (
+            base: files: lib.mapAttrsToList (variant: _: lib.nameValuePair "${base}-${variant}" files) variantFiles
+          ) baseCompanions
+        )
+      );
 
   # name -> module (also handed to NixOS hosts as `homes`)
   modules =
@@ -114,6 +136,7 @@ in
     homeModules
     homeProfiles
     modules
+    companions
     allSharedModules
     extraSpecialArgs
     configurations

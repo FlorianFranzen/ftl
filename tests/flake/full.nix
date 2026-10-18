@@ -92,13 +92,18 @@ check "flake-full" (
     # homes are wired into hosts, with shared home modules and `static`
     testHomesInHost = {
       expr = {
-        variant = alpha.home-manager.evaluated.alice.home.file.variant.text;
-        shared = alpha.home-manager.evaluated.alice.home.file.common.source;
+        variant = alpha.home-manager.users.alice.home.file.variant.text;
+        shared = alpha.home-manager.users.alice.home.file.common.source;
       };
       expected = {
         variant = "dark";
         shared = fixture + "/static/wallpapers/dark.png";
       };
+    };
+    # the desktop profile's nixos.nix reaches a host through its user's home
+    testHomeCompanionInHost = {
+      expr = alpha.environment.etc."desktop-companion".text;
+      expected = "from home/profiles/desktop";
     };
     testStaticInHost = {
       expr = alpha.environment.etc.marker.source;
@@ -169,6 +174,7 @@ check "flake-full" (
       };
       expected = {
         names = [
+          "generators"
           "hosts"
           "manifest"
           "services"
@@ -184,6 +190,9 @@ check "flake-full" (
       expected = [
         "extra"
         "fleetl"
+        "generate-age-key"
+        "generate-host-keys"
+        "generate-token"
         "hello-ftl"
         "unfree-ftl"
       ];

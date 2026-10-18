@@ -4,7 +4,7 @@
   ftl,
   nixpkgs,
   fixture,
-  hmStub,
+  home-manager,
   check,
   ...
 }:
@@ -18,7 +18,7 @@ let
       "x86_64-linux"
       "aarch64-linux"
     ];
-    homeManager = hmStub;
+    homeManager = home-manager;
     bases = {
       terminal = [ "terminal" ];
       desktop = [
@@ -39,14 +39,28 @@ let
 in
 check "unit-home" (
   lib.runTests {
+    # a profile dir's nixos.nix is not a home module; it is the configuration's companion
+    testCompanions = {
+      expr = {
+        companions = h.companions.desktop-dark;
+        terminal = h.companions.terminal-dark;
+      };
+      expected = {
+        companions = [ (fixture + "/home/profiles/desktop/nixos.nix") ];
+        terminal = [ ];
+      };
+    };
+
     testNames = {
       expr = builtins.attrNames h.modules;
       expected = names;
     };
 
     # a base includes only the direct files of its profile dirs
+    # the fixture's files (home-manager adds a few of its own); nothing from
+    # desktop/light, a subdirectory of a listed dir
     testDirectFilesOnly = {
-      expr = builtins.attrNames (cfg "x86_64-linux" "desktop-dark").file;
+      expr = lib.filter (n: !lib.hasPrefix "/" n) (builtins.attrNames (cfg "x86_64-linux" "desktop-dark").file);
       expected = [
         "common"
         "desktop"

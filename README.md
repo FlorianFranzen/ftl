@@ -1,10 +1,10 @@
 # ftl — fleet template library
 
-ftl turns a repository with a standard folder layout into the flake outputs of a
-fleet of NixOS hosts, and adds an optional fleet-update pipeline on top. Every root folder is one output
-family, handled by its own `mk*` function that only looks at that folder;
-`ftl.lib.mkFlake` runs on the repository root and delegates to them. Each
-`mk*` function can also be used on its own.
+ftl turns a repository with a standard folder layout into the flake outputs
+of a fleet of NixOS hosts, and adds an optional fleet-update pipeline on top.
+Every root folder is one output family, handled by its own `mk*` function that
+only looks at that folder; `ftl.lib.mkFlake` runs on the repository root and
+delegates to them. Each `mk*` function can also be used on its own.
 
 | Root folder | Contents | Function | Flake outputs |
 |---|---|---|---|
@@ -62,11 +62,18 @@ Missing folders are skipped. Folder names can be changed with
   `home/variants/*`, named `<base>-<variant>`. A base includes only the
   *direct* `.nix` files of each listed dir. Configurations are built for every
   `home.systems` entry (`homeConfigurations` uses the first one).
+- **Home and host.** A profile directory may carry a `nixos.nix` next to its
+  home modules: the NixOS side that profile cannot do without (a PAM entry for
+  the locker, portals, fonts). It is never part of the home; when a host gives
+  a user a configuration built from that directory (`home` in `user.nix`), the
+  host imports it. So adding a desktop home to a user adds exactly the system
+  integration it needs, and a host with only terminal homes gets none of it.
 - **Users.** `users/<name>/` is a person (or a deploy key): `user.nix` says
   where they have an account: an `admin` is on every host, in `wheel`, and may
   deploy; anyone else is on the `hosts` listed and on the hosts of the
   `services` listed. `home` names one of the home configurations
-  (`<base>-<variant>`), installed through home-manager on those hosts. The
+  (`<base>-<variant>`), installed through home-manager on those hosts, or is
+  `{ default = …; <host> = …; }` for one per host. The
   access module (`fleet.access`, on as soon as a host has users) creates the
   accounts with the keys of `ssh.pub` and no password, turns off password and
   root login in sshd, lets admins sudo against their forwarded SSH agent
@@ -93,14 +100,37 @@ Missing folders are skipped. Folder names can be changed with
   its module is imported into every host and `fleet.secrets` points it at the
   host's store and key; a service module reaches its own store as
   `service.sopsFile`.
+- **Generators** make a host's keys. `nixos/generators/<name>.nix` is
+  `{ pkgs }: { files; script; runtimeInputs; }`: the script writes the `files`
+  into `$out`; public ones land next to `host.nix` (every `<name>.pub` there is
+  `fleet.hosts.<h>.keys.<name>`), secret ones go into `secrets.yaml` as
+  `<generator>/<file>` or, with `store = "identity"`, into `identity.yaml`.
+  `host.nix` lists the generators a host uses (`generators`; `host-keys`, the
+  SSH host and initrd keys, by default; `age-key` for a dedicated age key).
+  `fleetl host init` runs them, `fleetl host generate <host>` runs the ones
+  whose files are missing later (`--force` for all of them), and
+  `packages.<sys>.generate-<name>` is each one as a program.
+
+  ```nix
+  # nixos/generators/wireguard.nix
+  { pkgs }: {
+    runtimeInputs = [ pkgs.wireguard-tools ];
+    files = { "wireguard.pub" = { }; private = { secret = true; }; };
+    script = ''
+      wg genkey > "$out/private"
+      wg pubkey < "$out/private" > "$out/wireguard.pub"
+    '';
+  }
+  ```
 - **`fleetl`** (alias `ftl`; `nix run .#fleetl -- …`, or `packages.<sys>.fleetl`
   in a dev shell) is the fleet from the admin's machine, inside the repository:
 
   ```
   fleetl secrets sync [--check]   .sops.yaml from the layout, re-key the stores
   fleetl secrets edit <store>     sops on a store
-  fleetl host init <name>         a host folder with fresh host keys: ssh.pub,
-                                  initrd.pub, identity.yaml (--age-key: a sops.age too)
+  fleetl host init <name>         a host folder, its generators run (--age-key:
+                                  a dedicated age key too)
+  fleetl host generate <name>     the host's generators whose files are missing
   fleetl host install <name> <target> [--disk-key] [-- <nixos-anywhere args>]
                                   nixos-anywhere with the identity in place
   fleetl host show | service show | user show <name>
@@ -109,6 +139,12 @@ Missing folders are skipped. Folder names can be changed with
 
   The check `fleet-sops` fails when `.sops.yaml` is not what `secrets sync`
   would write.
+- **Deploying** with deploy-rs: `ftl.lib.mkDeploy { hosts = self.fleet.hosts;
+  inherit (self) nixosConfigurations; deploy = inputs.deploy-rs; sshUser = "admin"; }`
+  is the `deploy` output, one node per host, reached by its `fqdn` (or
+  `address = h: …`) and checked against its `ssh.pub`, so stale DNS or
+  known_hosts entries never get in the way. comin (`fleet.comin`) is the
+  pull-based alternative.
 - **Static files** are a lookup, not an installer. A file's key is its name
   without its last extension: `static/wallpapers/nixish-dark.png` becomes
   `static.wallpapers.nixish-dark`. Every directory also has an `outPath`, so
@@ -149,7 +185,7 @@ Three things live under `nixos/` besides hosts, and they are easy to mix up:
 
 | | unit of | delivered by |
 |---|---|---|
-| **service** (`nixos/services/<name>/`) | placement: where something runs, with its data (and, later, its secrets and state) | the hosts' NixOS configurations: modules, rebuilt with the system |
+| **service** (`nixos/services/<name>/`) | placement: where something runs, with its data, secrets and state | the hosts' NixOS configurations: modules, rebuilt with the system |
 | **layer** (`nixos/layers/<name>.nix`) | independent delivery: an update without a system rebuild | a Nix profile under `/nix/var/nix/profiles/layers/` |
 | **profile** (`nixos/profiles/**.nix`) | reuse: a building block | imported by hosts and services through `profiles` |
 
@@ -179,7 +215,10 @@ Three things live under `nixos/` besides hosts, and they are easy to mix up:
   unit its `units` wait for, so the root filesystem stays disposable. `kind =
   "state"` is small and precious (snapshotted, backed up by default), `"data"`
   bulk and re-obtainable. An entry declared by a service module with `service =
-  service.name` moves with the service: its declaration, and its contents.
+  service.name` moves with the service: its declaration, and its contents
+  (`fleetl service show` lists them). A unit of an entry must run with a fixed
+  uid or as `DynamicUser`, or evaluation fails: dynamically allocated uids
+  live on the root filesystem and would not survive a reinstall.
 
 - **Layers** (`nixos/layers/<name>.nix`, `{ kind; packages = pkgs: [ … ]; units; }`)
   are independently versioned Nix profiles under
@@ -271,17 +310,30 @@ deploys. Keep these in mind when setting it up.
 
 ## Tests
 
-`nix flake check` runs, fully offline:
+The library flake has no inputs. The test suite lives in two flakes with the
+same checks, `tests/stable` (nixpkgs `nixos-26.05`, home-manager
+`release-26.05`, sops-nix) and `tests/unstable` (both unstable), each with its
+own lock and ftl as a relative input; `nix flake check ./tests/stable` or
+`./tests/unstable` runs it, fully offline once the inputs are fetched. A canary
+bumps one of them (`nix flake update` in that directory) and runs its check to
+see whether the library still works with the channel's current head:
 
-- `unit-loader`, `unit-static`, `unit-packages`, `unit-home`, `unit-nixos`:
-  each `mk*` called directly on its folder of `tests/fixtures/layout`;
+- `unit-loader`, `unit-static`, `unit-packages`, `unit-home`, `unit-nixos`,
+  `unit-users`, `unit-deploy`: each `mk*` called directly on its folder of
+  `tests/fixtures/layout`;
 - `flake-isolated`: each family through `mkFlake` with all other folders
   disabled;
 - `flake-full`: all families together (overlay and config in hosts and layers,
   homes in hosts, `static` everywhere, manifest, per-system checks,
   pass-through, renamed folders);
+- `cli`: the fixture's `.sops.yaml` is what `fleetl secrets render` makes of
+  its layout (the `fleet-sops` check);
 - VM tests:
   - `modules`: a `mkFlake` host with every ftl module enabled;
+  - `state-btrfs`, `state-zfs`: `fleet.state` on an empty disk, then a
+    filesystem or pool;
+  - `services`: `fleet.secrets` with sops-nix for real: a host decrypts its own
+    store and a service's with its SSH host key, no age key installed;
   - `layers`: layer install, update, pins and rollback, plus the comin hook;
   - `pipeline`: fast-forward, layer pinning, broken builds, retention,
     daemon-signed cache, refusal of an unsigned branch tip, lane locking;

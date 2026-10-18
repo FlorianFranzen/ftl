@@ -7,23 +7,31 @@
   ...
 }:
 let
+  # Read-only options (hooks) cannot be set anyway, and forwarding an alias
+  # into one counts as a second definition, so they have no mirror.
   mirror =
     tree:
-    lib.mapAttrs (
-      _: v:
+    lib.concatMapAttrs (
+      n: v:
       if lib.isOption v then
-        lib.mkOption {
-          type = v.type;
-          visible = false;
+        lib.optionalAttrs (!(v.readOnly or false)) {
+          ${n} = lib.mkOption {
+            type = v.type;
+            visible = false;
+          };
         }
       else
-        mirror v
+        { ${n} = mirror v; }
     ) tree;
 
   forward =
     from: tree:
-    lib.mapAttrs (
-      n: v: if lib.isOption v then lib.mkAliasDefinitions from.${n} else forward from.${n} v
+    lib.concatMapAttrs (
+      n: v:
+      if lib.isOption v then
+        lib.optionalAttrs (!(v.readOnly or false)) { ${n} = lib.mkAliasDefinitions from.${n}; }
+      else
+        { ${n} = forward from.${n} v; }
     ) tree;
 
   defined =

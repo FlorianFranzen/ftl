@@ -1,4 +1,4 @@
-{ pkgs, static, ... }:
+{ pkgs, ... }:
 {
   boot.loader.grub.device = "nodev";
   fileSystems."/" = {
@@ -6,6 +6,5 @@
     fsType = "ext4";
   };
   environment.systemPackages = [ pkgs.hello-example ];
-  environment.etc."motd".source = static.motd;
   system.stateVersion = "26.05";
 }

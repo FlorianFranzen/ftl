@@ -4,8 +4,9 @@
   ftl,
   nixpkgs,
   fixture,
-  hmStub,
-  sopsStub,
+  home-manager,
+  sops-nix,
+  comin,
   check,
   ...
 }:
@@ -23,8 +24,8 @@ let
     name = "unit";
     inherit (packages) pkgsFor;
     sharedModules = [
-      hmStub.nixosModules.home-manager
-      sopsStub.nixosModules.sops
+      home-manager.nixosModules.home-manager
+      sops-nix.nixosModules.sops
       {
         nixpkgs.overlays = packages.overlays;
         nixpkgs.config = packages.config;
@@ -39,7 +40,12 @@ let
         environment.etc."extra-only".text = "extra";
       };
     };
-    homes.desktop-dark = { };
+    # stand-ins for home configurations (home-manager wants a stateVersion)
+    homes = {
+      desktop-dark.home.stateVersion = "26.05";
+      terminal-dark.home.stateVersion = "26.05";
+    };
+    homeCompanions.desktop-dark = [ { environment.etc."desktop-companion".text = "stub"; } ];
     users =
       (ftl.lib.mkUsers {
         src = fixture + "/users";
@@ -114,6 +120,7 @@ check "unit-nixos" (
             "alice"
             "bob"
           ];
+          generators = [ "host-keys" ];
           keys = {
             ssh = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO7pFvyv5FcmP7vj/Q0OeeOBecLE9K/75Qch2uR6eRSl";
             initrd = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKODezmkKcdWZ4strBZey4HXGUlIdwQZ5CtDzbAzqvMZ";
@@ -128,6 +135,7 @@ check "unit-nixos" (
           layers = [ "tools" ];
           services = [ "mesh" ];
           users = [ "alice" ];
+          generators = [ "host-keys" ];
           keys.age = "age1880pyzlyypv0cmec6e3tgwww9tgum9cywqn5743flkdz6krlxy2sksedxt";
         };
         gamma = {
@@ -137,8 +145,43 @@ check "unit-nixos" (
           layers = [ "tools" ];
           services = [ "mesh" ];
           users = [ "alice" ];
+          generators = [ "host-keys" ];
         };
       };
+    };
+
+    # ftl's generators and the repository's, what they make
+    testGenerators = {
+      expr = {
+        names = builtins.attrNames n.generators;
+        token = n.generators.token.files;
+        identity = builtins.attrNames (
+          lib.filterAttrs (_: f: f.store or "" == "identity") n.generators.host-keys.files
+        );
+      };
+      expected = {
+        names = [
+          "age-key"
+          "host-keys"
+          "token"
+        ];
+        token = {
+          "token.pub" = { };
+          secret.secret = true;
+        };
+        identity = [
+          "initrd_ssh_host_ed25519_key"
+          "ssh_host_ed25519_key"
+        ];
+      };
+    };
+    testUndefinedGenerator = {
+      expr =
+        !(builtins.tryEval (builtins.attrNames (ftl.lib.mkNixos {
+          inherit nixpkgs;
+          hosts.delta.generators = [ "nope" ];
+        }).hosts)).success;
+      expected = true;
     };
 
     # service.nix is metadata: hosts (or roles), layers, free-form data
@@ -242,6 +285,8 @@ check "unit-nixos" (
             lib.filterAttrs (n: _: lib.hasPrefix "alpha" n) b.programs.ssh.knownHosts
           );
           home = b.home-manager.users ? alice;
+          # bob's home is per host: alpha has one, no `default` for others
+          bobHome = builtins.attrNames a.home-manager.users;
         };
       expected = {
         accounts = [
@@ -274,7 +319,49 @@ check "unit-nixos" (
           ];
         };
         home = true;
+        bobHome = [
+          "alice"
+          "bob"
+        ];
       };
+    };
+
+    # alice's desktop home brings the desktop profile's NixOS side to her hosts
+    testHomeCompanions = {
+      expr = {
+        alpha = (cfg "alpha").environment.etc ? "desktop-companion";
+        gamma = (cfg "gamma").environment.etc ? "desktop-companion";
+      };
+      expected = {
+        alpha = true;
+        gamma = true;
+      };
+    };
+
+    # a state entry whose unit runs as a user without a fixed uid fails
+    testStateFloatingUid = {
+      expr =
+        let
+          c =
+            (ftl.lib.mkNixos {
+              inherit nixpkgs;
+              hosts.delta.modules = [
+                {
+                  fleet.storage.btrfsDevice = "/dev/vdb";
+                  fleet.state.db = {
+                    path = "/var/lib/db";
+                    units = [ "db" ];
+                  };
+                  systemd.services.db.serviceConfig.User = "db";
+                  users.users.db.isSystemUser = true;
+                  users.users.db.group = "db";
+                  users.groups.db = { };
+                }
+              ];
+            }).nixosConfigurations.delta.config;
+        in
+        lib.filter (a: !a.assertion) c.assertions != [ ];
+      expected = true;
     };
 
     # secrets: the host store through sops-nix, a service's through `service.sopsFile`
@@ -287,7 +374,7 @@ check "unit-nixos" (
         };
         # beta decrypts with a dedicated age key; gamma has no store (yet)
         betaAgeKey = (cfg "beta").sops.age.keyFile;
-        gamma = (cfg "gamma").sops.defaultSopsFile;
+        gamma = (cfg "gamma").fleet.secrets.file;
       };
       expected = {
         alpha = {
@@ -445,7 +532,7 @@ check "unit-nixos" (
         (ftl.lib.mkNixos {
           src = fixture + "/nixos";
           inherit nixpkgs;
-          sharedModules = [ hmStub.nixosModules.home-manager ];
+          sharedModules = [ home-manager.nixosModules.home-manager ];
           hosts.gamma.modules = [
             (
               {
@@ -535,6 +622,34 @@ check "unit-nixos" (
         svc.kind = "units";
         tools.kind = "packages";
       };
+    };
+
+    # with comin's module imported and enabled, its post-deployment hook is ftl's
+    testCominHook = {
+      expr =
+        let
+          c =
+            (ftl.lib.mkNixos {
+              inherit nixpkgs;
+              sharedModules = [ comin.nixosModules.comin ];
+              hosts.delta.modules = [
+                {
+                  services.comin = {
+                    enable = true;
+                    remotes = [
+                      {
+                        name = "origin";
+                        url = "https://example.org/fleet.git";
+                        branches.main.name = "main";
+                      }
+                    ];
+                  };
+                }
+              ];
+            }).nixosConfigurations.delta.config;
+        in
+        c.fleet.comin.enable && c.services.comin.postDeploymentCommand == c.fleet.comin.hook;
+      expected = true;
     };
 
     # the old option names still work, with a warning

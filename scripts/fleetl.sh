@@ -4,7 +4,9 @@
 #   fleetl secrets render               .sops.yaml for the `fleet.sops` JSON on stdin
 #   fleetl secrets edit <store>         sops on a store (creates it)
 #   fleetl host init <name> [--system <s>] [--age-key]
-#                                       new host folder with fresh host keys
+#                                       new host folder, its generators run
+#   fleetl host generate <name> [--force] [<generator>...]
+#                                       run the host's generators whose files are missing
 #   fleetl host install <name> <target> [--disk-key] [-- <nixos-anywhere args>]
 #                                       install a host with its identity in place
 #   fleetl host show <name>             a host: services, users, layers, keys, stores
@@ -79,7 +81,7 @@ secrets_sync() {
   esac
 
   tmp="$(mktemp)"
-  trap 'rm -f "$tmp"' RETURN
+  trap 'rm -f "$tmp"; trap - RETURN' RETURN
   fleet_json sops | secrets_render >"$tmp"
 
   if [ -f .sops.yaml ] && cmp -s "$tmp" .sops.yaml; then
@@ -130,6 +132,16 @@ show() { # <kind: hosts|services|users> <name>
       if (.value | type) == "array" then "  \(.key): \(.value | list)"
       elif (.value | type) == "object" then "  \(.key):", (.value | to_entries[] | "    \(.key): \(.value | tostring)")
       else "  \(.key): \(.value)" end)' <<<"$json"
+  if [ "$kind" = services ]; then
+    echo "  state:"
+    local h
+    for h in $(jq -r '.hosts[]' <<<"$json"); do
+      nix eval --json ".#nixosConfigurations.$h.config.fleet.state" 2>/dev/null |
+        jq -r --arg n "$name" --arg h "$h" '
+          to_entries[] | select(.value.service == $n) |
+          "    \($h): \(.key) \(.value.path) (\(.value.location), \(.value.kind))"'
+    done
+  fi
   echo "  stores:"
   fleet_json sops | jq -r --arg n "$name" --arg kind "$kind" '
     .stores[] | select(
@@ -155,46 +167,142 @@ host_init() {
   local dir="nixos/hosts/$name"
   [ -e "$dir" ] && die "$dir exists"
 
+  mkdir -p "$dir"
+  {
+    echo "# ftl host metadata (not a NixOS module); everything below \`importance\` is"
+    echo "# shared with every host through \`fleet.hosts\`."
+    echo "{"
+    echo "  system = \"$system\";"
+    echo "  importance = \"required\";"
+    if [ "$agekey" = 1 ]; then
+      echo
+      echo "  # the host keys, and a dedicated age key for its secrets instead of the"
+      echo "  # SSH host key"
+      echo "  generators = ["
+      echo "    \"host-keys\""
+      echo "    \"age-key\""
+      echo "  ];"
+    fi
+    echo "}"
+  } >"$dir/host.nix"
+  git add -N "$dir"
+
+  host_generate "$name"
+  echo "created $dir; next: its modules, then fleetl secrets edit $dir/secrets.yaml"
+}
+
+# Is a secret of a generator in a store already?  sops leaves the keys of a
+# store in the clear, only the values are encrypted.
+has_secret() { # <store file> <yq path>
+  [ -f "$1" ] && yq -e "$2" "$1" >/dev/null 2>&1
+}
+
+# Run the host's generators whose files are missing (or the ones named;
+# --force runs them again).  Public files land next to host.nix, secret ones
+# in secrets.yaml (as <generator>/<file>) or identity.yaml (as <file>).  A
+# store that does not exist yet is written once for everything generated, so
+# a fresh host needs no key of the admin's; adding to an existing store does.
+host_generate() {
+  in_repo
+  local name="${1:?usage: fleetl host generate <name> [--force] [<generator>...]}" force=0
+  shift
+  local -a wanted=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --force) force=1; shift ;;
+      -*) usage ;;
+      *) wanted+=("$1"); shift ;;
+    esac
+  done
+  local dir="nixos/hosts/$name"
+  [ -d "$dir" ] || die "no $dir"
+  local host gens
+  host="$(fleet_json "hosts.$name")" || die "no host $name"
+  gens="$(fleet_json generators)"
+  if [ "${#wanted[@]}" = 0 ]; then
+    mapfile -t wanted < <(jq -r '.generators[]' <<<"$host")
+  fi
+
   local tmp
   tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' RETURN
+  # (a RETURN trap outlives the function: clear it when it has run)
+  trap 'rm -rf "$tmp"; trap - RETURN' RETURN
   chmod 700 "$tmp"
 
-  ssh-keygen -q -t ed25519 -N '' -C "$name" -f "$tmp/ssh_host_ed25519_key"
-  ssh-keygen -q -t ed25519 -N '' -C "$name initrd" -f "$tmp/initrd_ssh_host_ed25519_key"
+  # 1. run what is missing; public files go next to host.nix right away
+  local gen spec f secret st
+  local -a ran=()
+  for gen in "${wanted[@]}"; do
+    spec="$(jq -e --arg g "$gen" '.[$g]' <<<"$gens")" || die "no generator '$gen'"
 
-  mkdir -p "$dir"
-  cat >"$dir/host.nix" <<EOF
-# ftl host metadata (not a NixOS module); everything below \`importance\` is
-# shared with every host through \`fleet.hosts\`.
-{
-  system = "$system";
-  importance = "required";
-}
-EOF
-  cut -d' ' -f1,2 "$tmp/ssh_host_ed25519_key.pub" >"$dir/ssh.pub"
-  cut -d' ' -f1,2 "$tmp/initrd_ssh_host_ed25519_key.pub" >"$dir/initrd.pub"
-
-  {
-    echo "ssh_host_ed25519_key: |"
-    sed 's/^/  /' "$tmp/ssh_host_ed25519_key"
-    echo "initrd_ssh_host_ed25519_key: |"
-    sed 's/^/  /' "$tmp/initrd_ssh_host_ed25519_key"
-    if [ "$agekey" = 1 ]; then
-      age-keygen -o "$tmp/age.txt" 2>/dev/null
-      grep '^# public key:' "$tmp/age.txt" | cut -d' ' -f4 >"$dir/sops.age"
-      echo "age_key: |"
-      sed 's/^/  /' "$tmp/age.txt"
+    if [ "$force" = 0 ]; then
+      local missing=0
+      while IFS=$'\t' read -r f secret st; do
+        if [ "$secret" = true ]; then
+          if [ "$st" = identity ]; then
+            has_secret "$dir/identity.yaml" ".[\"$f\"]" || missing=1
+          else
+            has_secret "$dir/secrets.yaml" ".[\"$gen\"][\"$f\"]" || missing=1
+          fi
+        else
+          [ -e "$dir/$f" ] || missing=1
+        fi
+      done < <(jq -r '.files | to_entries[] | [.key, (.value.secret // false | tostring), (.value.store // "secrets")] | @tsv' <<<"$spec")
+      if [ "$missing" = 0 ]; then
+        echo "$gen: $name has its files"
+        continue
+      fi
     fi
-  } >"$tmp/identity.yaml"
 
-  # The flake has to see the new folder for its store to get recipients.
+    echo "$gen: generating for $name"
+    mkdir -p "$tmp/$gen"
+    HOST="$name" nix run ".#generate-$gen" -- "$tmp/$gen"
+    while IFS= read -r f; do
+      install -m 644 "$tmp/$gen/$f" "$dir/$f"
+    done < <(jq -r '.files | to_entries[] | select(.value.secret != true) | .key' <<<"$spec")
+    ran+=("$gen")
+  done
+  [ "${#ran[@]}" = 0 ] && return 0
+
+  # the public files may have made the host a recipient
   git add -N "$dir"
   fleet_json sops | secrets_render >.sops.yaml
-  sops --encrypt --filename-override "$dir/identity.yaml" --output "$dir/identity.yaml" "$tmp/identity.yaml"
 
-  echo "created $dir with host.nix, ssh.pub, initrd.pub$([ "$agekey" = 1 ] && echo ', sops.age') and identity.yaml"
-  echo "next: add the host's modules, then fleetl secrets sync, fleetl secrets edit $dir/secrets.yaml"
+  # 2. the secret files, into the stores: all at once into a new store, one
+  #    by one into an existing one
+  local store path doc
+  for store in secrets identity; do
+    path="$dir/$store.yaml"
+    doc="$tmp/$store.yaml"
+    : >"$doc"
+    local -a sets=()
+    for gen in "${ran[@]}"; do
+      spec="$(jq --arg g "$gen" '.[$g]' <<<"$gens")"
+      while IFS= read -r f; do
+        if [ "$store" = identity ]; then
+          F="$f" V="$(cat "$tmp/$gen/$f")" yq -i '.[strenv(F)] = strenv(V)' "$doc"
+          sets+=("[\"$f\"]	$tmp/$gen/$f")
+        else
+          G="$gen" F="$f" V="$(cat "$tmp/$gen/$f")" yq -i '.[strenv(G)][strenv(F)] = strenv(V)' "$doc"
+          sets+=("[\"$gen\"][\"$f\"]	$tmp/$gen/$f")
+        fi
+      done < <(jq -r --arg s "$store" \
+        '.files | to_entries[] | select(.value.secret == true and (.value.store // "secrets") == $s) | .key' <<<"$spec")
+    done
+    [ "${#sets[@]}" = 0 ] && continue
+    if [ -f "$path" ]; then
+      echo "$store.yaml: adding ${#sets[@]} secret(s) (needs your key)"
+      local entry
+      for entry in "${sets[@]}"; do
+        sops set "$path" "${entry%%	*}" "$(jq -Rs . <"${entry#*	}")" ||
+          die "could not add ${entry%%	*} to $path"
+      done
+    else
+      echo "$store.yaml: written"
+      sops --encrypt --filename-override "$path" --output "$path" "$doc"
+      git add -N "$path"
+    fi
+  done
 }
 
 host_install() {
@@ -216,7 +324,7 @@ host_install() {
 
   local tmp
   tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' RETURN
+  trap 'rm -rf "$tmp"; trap - RETURN' RETURN
   chmod 700 "$tmp"
 
   local extra="$tmp/extra" keys
@@ -319,6 +427,7 @@ case "${1:-}" in
   host)
     case "${2:-}" in
       init) shift 2; host_init "$@" ;;
+      generate) shift 2; host_generate "$@" ;;
       install) shift 2; host_install "$@" ;;
       show) show hosts "${3:?usage: fleetl host show <name>}" ;;
       *) usage ;;
