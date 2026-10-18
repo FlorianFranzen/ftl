@@ -130,6 +130,16 @@ show() { # <kind: hosts|services|users> <name>
       if (.value | type) == "array" then "  \(.key): \(.value | list)"
       elif (.value | type) == "object" then "  \(.key):", (.value | to_entries[] | "    \(.key): \(.value | tostring)")
       else "  \(.key): \(.value)" end)' <<<"$json"
+  if [ "$kind" = services ]; then
+    echo "  state:"
+    local h
+    for h in $(jq -r '.hosts[]' <<<"$json"); do
+      nix eval --json ".#nixosConfigurations.$h.config.fleet.state" 2>/dev/null |
+        jq -r --arg n "$name" --arg h "$h" '
+          to_entries[] | select(.value.service == $n) |
+          "    \($h): \(.key) \(.value.path) (\(.value.location), \(.value.kind))"'
+    done
+  fi
   echo "  stores:"
   fleet_json sops | jq -r --arg n "$name" --arg kind "$kind" '
     .stores[] | select(

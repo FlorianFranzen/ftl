@@ -62,11 +62,18 @@ Missing folders are skipped. Folder names can be changed with
   `home/variants/*`, named `<base>-<variant>`. A base includes only the
   *direct* `.nix` files of each listed dir. Configurations are built for every
   `home.systems` entry (`homeConfigurations` uses the first one).
+- **Home and host.** A profile directory may carry a `nixos.nix` next to its
+  home modules: the NixOS side that profile cannot do without (a PAM entry for
+  the locker, portals, fonts). It is never part of the home; when a host gives
+  a user a configuration built from that directory (`home` in `user.nix`), the
+  host imports it. So adding a desktop home to a user adds exactly the system
+  integration it needs, and a host with only terminal homes gets none of it.
 - **Users.** `users/<name>/` is a person (or a deploy key): `user.nix` says
   where they have an account: an `admin` is on every host, in `wheel`, and may
   deploy; anyone else is on the `hosts` listed and on the hosts of the
   `services` listed. `home` names one of the home configurations
-  (`<base>-<variant>`), installed through home-manager on those hosts. The
+  (`<base>-<variant>`), installed through home-manager on those hosts, or is
+  `{ default = …; <host> = …; }` for one per host. The
   access module (`fleet.access`, on as soon as a host has users) creates the
   accounts with the keys of `ssh.pub` and no password, turns off password and
   root login in sshd, lets admins sudo against their forwarded SSH agent
@@ -185,7 +192,10 @@ Three things live under `nixos/` besides hosts, and they are easy to mix up:
   unit its `units` wait for, so the root filesystem stays disposable. `kind =
   "state"` is small and precious (snapshotted, backed up by default), `"data"`
   bulk and re-obtainable. An entry declared by a service module with `service =
-  service.name` moves with the service: its declaration, and its contents.
+  service.name` moves with the service: its declaration, and its contents
+  (`fleetl service show` lists them). A unit of an entry must run with a fixed
+  uid or as `DynamicUser`, or evaluation fails: dynamically allocated uids
+  live on the root filesystem and would not survive a reinstall.
 
 - **Layers** (`nixos/layers/<name>.nix`, `{ kind; packages = pkgs: [ … ]; units; }`)
   are independently versioned Nix profiles under
@@ -277,7 +287,11 @@ deploys. Keep these in mind when setting it up.
 
 ## Tests
 
-`nix flake check` runs, fully offline:
+The library flake has no inputs; the test suite is its own flake,
+`tests/flake.nix`, with nixpkgs stable and unstable, sops-nix and ftl itself
+(a relative input) as inputs. `nix flake check ./tests` runs every test twice,
+as `stable-<name>` and `unstable-<name>`, fully offline once the inputs are
+fetched:
 
 - `unit-loader`, `unit-static`, `unit-packages`, `unit-home`, `unit-nixos`,
   `unit-users`, `unit-deploy`: each `mk*` called directly on its folder of
@@ -293,6 +307,8 @@ deploys. Keep these in mind when setting it up.
   - `modules`: a `mkFlake` host with every ftl module enabled;
   - `state-btrfs`, `state-zfs`: `fleet.state` on an empty disk, then a
     filesystem or pool;
+  - `services`: `fleet.secrets` with sops-nix for real: a host decrypts its own
+    store and a service's with its SSH host key, no age key installed;
   - `layers`: layer install, update, pins and rollback, plus the comin hook;
   - `pipeline`: fast-forward, layer pinning, broken builds, retention,
     daemon-signed cache, refusal of an unsigned branch tip, lane locking;

@@ -30,6 +30,7 @@
 #
 # Their users must not depend on dynamically allocated uids (those live in
 # /var/lib/nixos on the root filesystem): use a fixed uid or DynamicUser.
+# An entry whose unit runs as a user without one fails evaluation.
 #
 # `backup` and `snapshots` are declarations for whatever does the backing up;
 # this module only creates and mounts.
@@ -60,6 +61,32 @@ let
     "compress=zstd"
     "noatime"
   ];
+
+  # The unit's user, when it is one this configuration defines (template
+  # units and units from layers are not checked), unless it has a fixed uid
+  # or is dynamic.
+  floatingUser =
+    unit:
+    let
+      sc = config.systemd.services.${unit}.serviceConfig or { };
+      user = sc.User or null;
+      dynamic = sc.DynamicUser or false;
+      fixed = user != null && config.users.users ? ${user} && config.users.users.${user}.uid != null;
+    in
+    if dynamic == true || user == null || !(config.users.users ? ${user}) || fixed then null else user;
+
+  floating = lib.concatLists (
+    lib.mapAttrsToList (
+      name: entry:
+      lib.concatMap (
+        unit:
+        let
+          u = floatingUser unit;
+        in
+        lib.optional (u != null) "${name}: ${unit} runs as ${u}"
+      ) (lib.filter (u: !lib.hasSuffix "@" u) entry.units)
+    ) entries
+  );
 
   zfsSet =
     dataset: properties:
@@ -209,6 +236,14 @@ in
       {
         assertion = zfs || device != null;
         message = "fleet.state needs a btrfs filesystem (fleet.storage.btrfsDevice) or a ZFS pool (fleet.storage.zfsPool)";
+      }
+      {
+        assertion = floating == [ ];
+        message = ''
+          fleet.state: a unit runs as a user without a fixed uid, so its files
+          would belong to someone else after a reinstall; set users.users.<user>.uid
+          or use DynamicUser:
+            ${lib.concatStringsSep "\n  " floating}'';
       }
     ];
 

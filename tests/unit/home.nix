@@ -39,6 +39,18 @@ let
 in
 check "unit-home" (
   lib.runTests {
+    # a profile dir's nixos.nix is not a home module; it is the configuration's companion
+    testCompanions = {
+      expr = {
+        companions = h.companions.desktop-dark;
+        terminal = h.companions.terminal-dark;
+      };
+      expected = {
+        companions = [ (fixture + "/home/profiles/desktop/nixos.nix") ];
+        terminal = [ ];
+      };
+    };
+
     testNames = {
       expr = builtins.attrNames h.modules;
       expected = names;

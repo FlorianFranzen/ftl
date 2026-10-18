@@ -29,6 +29,7 @@ check "unit-loader" (
         desktop = {
           desktop = profiles + "/desktop/desktop.nix";
           light.light = profiles + "/desktop/light/light.nix";
+          nixos = profiles + "/desktop/nixos.nix";
         };
         terminal.shell = profiles + "/terminal/shell.nix";
       };
@@ -48,6 +49,7 @@ check "unit-loader" (
       expected = [
         (profiles + "/desktop/desktop.nix")
         (profiles + "/desktop/light/light.nix")
+        (profiles + "/desktop/nixos.nix")
         (profiles + "/terminal/shell.nix")
       ];
     };

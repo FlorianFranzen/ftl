@@ -58,7 +58,8 @@
   layers ? { },
   # services.<name> = { hosts?; roles?; layers?; modules?; ... } (merged over discovered)
   services ? { },
-  # users.<name> = { admin?; hosts?; services?; home?; uid?; groups?; keys?; ... } (see mkUsers)
+  # users.<name> = { admin?; hosts?; services?; home?; uid?; groups?; keys?; ... } (see mkUsers);
+  # home is a configuration name, or { default?; <host>?; } for one per host
   users ? { },
   # system -> package set used to build layers
   pkgsFor ? system: import nixpkgs { inherit system; },
@@ -70,6 +71,8 @@
   static ? { },
   # home configurations as modules, passed as `homes`
   homes ? { },
+  # home configuration name -> NixOS modules it needs on the host (see mkHome)
+  homeCompanions ? { },
 }:
 let
   lib = nixpkgs.lib;
@@ -306,6 +309,14 @@ let
       };
       unknownHosts = lib.filter (h: !(hostSpecs ? ${h})) (spec.hosts or [ ]);
       unknownServices = lib.filter (s: !(serviceSpecs ? ${s})) user.services;
+      homeNames =
+        if user.home == null then
+          [ ]
+        else if builtins.isString user.home then
+          [ user.home ]
+        else
+          lib.filter (h: h != null) (builtins.attrValues user.home);
+      unknownHomes = lib.filter (h: !(homes ? ${h})) homeNames;
     in
     assert lib.assertMsg (!(spec ? name))
       "ftl: user '${userName}' sets reserved attribute 'name' (the directory name is the user name)";
@@ -313,8 +324,8 @@ let
       "ftl: user '${userName}' names undefined hosts: ${toString unknownHosts}";
     assert lib.assertMsg (unknownServices == [ ])
       "ftl: user '${userName}' names undefined services: ${toString unknownServices}";
-    assert lib.assertMsg (user.home == null || homes ? ${user.home})
-      "ftl: user '${userName}' wants home configuration '${toString user.home}', which does not exist";
+    assert lib.assertMsg (unknownHomes == [ ])
+      "ftl: user '${userName}' wants home configurations that do not exist: ${toString unknownHomes}";
     lib.warnIf (user.hosts != [ ] && user.keys.ssh == [ ])
       "ftl: user '${userName}' has an account on ${toString (builtins.length user.hosts)} host(s) but no SSH key (ssh.pub)"
       user;
@@ -322,6 +333,18 @@ let
   users' = builtins.mapAttrs normalizeUser users;
 
   usersOf = hostName: lib.filterAttrs (_: u: builtins.elem hostName u.hosts) users';
+
+  # The home configuration a user gets on a host: one name for everywhere, or
+  # the host's entry (falling back to `default`) of a per-host attrset.
+  # (`<host> = null` in the attrset means none on that host.)
+  homeOf =
+    hostName: user:
+    if user.home == null || builtins.isString user.home then
+      user.home
+    else if user.home ? ${hostName} then
+      user.home.${hostName}
+    else
+      user.home.default or null;
 
   # Every user, as seen by every host (`fleet.users`).
   userInfo = builtins.mapAttrs (
@@ -341,15 +364,18 @@ let
     }
   ) users';
 
-  # The home configurations of a host's users.
+  # The home configurations of a host's users, and the NixOS side those
+  # configurations' profiles need (their nixos.nix companions).
   homeModule =
     hostName:
     let
-      withHome = lib.filterAttrs (_: u: u.home != null) (usersOf hostName);
+      withHome = lib.filterAttrs (_: u: homeOf hostName u != null) (usersOf hostName);
+      names = lib.unique (lib.mapAttrsToList (_: u: homeOf hostName u) withHome);
     in
     lib.optional (withHome != { }) {
-      home-manager.users = lib.mapAttrs (_: u: homes.${u.home}) withHome;
-    };
+      home-manager.users = lib.mapAttrs (_: u: homes.${homeOf hostName u}) withHome;
+    }
+    ++ lib.unique (lib.concatMap (n: homeCompanions.${n} or [ ]) names);
 
   # --- secret stores ---------------------------------------------------------
   # Who can read which store: recipients are sops keys (pgp fingerprints, age

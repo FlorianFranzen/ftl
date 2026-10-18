@@ -100,6 +100,11 @@ check "flake-full" (
         shared = fixture + "/static/wallpapers/dark.png";
       };
     };
+    # the desktop profile's nixos.nix reaches a host through its user's home
+    testHomeCompanionInHost = {
+      expr = alpha.environment.etc."desktop-companion".text;
+      expected = "from home/profiles/desktop";
+    };
     testStaticInHost = {
       expr = alpha.environment.etc.marker.source;
       expected = fixture + "/static/marker.txt";

@@ -19,7 +19,10 @@ let
       hmStub.nixosModules.home-manager
       sopsStub.nixosModules.sops
     ];
-    homes.desktop-dark = { };
+    homes = {
+      desktop-dark = { };
+      terminal-dark = { };
+    };
     users =
       (ftl.lib.mkUsers {
         src = fixture + "/users";

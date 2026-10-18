@@ -156,6 +156,7 @@ let
         specialArgs = nixos.specialArgs or { };
         extraProfiles = nixos.extraProfiles or { };
         homes = if homeOut != null then homeOut.modules else { };
+        homeCompanions = if homeOut != null then homeOut.companions else { };
         sharedModules =
           lib.optional (homeOut != null && homeManager != null) homeManager.nixosModules.home-manager
           ++ lib.optional (inputs ? sops-nix) inputs.sops-nix.nixosModules.sops

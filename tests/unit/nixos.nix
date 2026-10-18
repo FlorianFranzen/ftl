@@ -39,7 +39,11 @@ let
         environment.etc."extra-only".text = "extra";
       };
     };
-    homes.desktop-dark = { };
+    homes = {
+      desktop-dark = { };
+      terminal-dark = { };
+    };
+    homeCompanions.desktop-dark = [ { environment.etc."desktop-companion".text = "stub"; } ];
     users =
       (ftl.lib.mkUsers {
         src = fixture + "/users";
@@ -242,6 +246,8 @@ check "unit-nixos" (
             lib.filterAttrs (n: _: lib.hasPrefix "alpha" n) b.programs.ssh.knownHosts
           );
           home = b.home-manager.users ? alice;
+          # bob's home is per host: alpha has one, no `default` for others
+          bobHome = builtins.attrNames a.home-manager.users;
         };
       expected = {
         accounts = [
@@ -274,7 +280,49 @@ check "unit-nixos" (
           ];
         };
         home = true;
+        bobHome = [
+          "alice"
+          "bob"
+        ];
       };
+    };
+
+    # alice's desktop home brings the desktop profile's NixOS side to her hosts
+    testHomeCompanions = {
+      expr = {
+        alpha = (cfg "alpha").environment.etc ? "desktop-companion";
+        gamma = (cfg "gamma").environment.etc ? "desktop-companion";
+      };
+      expected = {
+        alpha = true;
+        gamma = true;
+      };
+    };
+
+    # a state entry whose unit runs as a user without a fixed uid fails
+    testStateFloatingUid = {
+      expr =
+        let
+          c =
+            (ftl.lib.mkNixos {
+              inherit nixpkgs;
+              hosts.delta.modules = [
+                {
+                  fleet.storage.btrfsDevice = "/dev/vdb";
+                  fleet.state.db = {
+                    path = "/var/lib/db";
+                    units = [ "db" ];
+                  };
+                  systemd.services.db.serviceConfig.User = "db";
+                  users.users.db.isSystemUser = true;
+                  users.users.db.group = "db";
+                  users.groups.db = { };
+                }
+              ];
+            }).nixosConfigurations.delta.config;
+        in
+        lib.filter (a: !a.assertion) c.assertions != [ ];
+      expected = true;
     };
 
     # secrets: the host store through sops-nix, a service's through `service.sopsFile`
