@@ -4,8 +4,9 @@
   ftl,
   nixpkgs,
   fixture,
-  hmStub,
-  sopsStub,
+  home-manager,
+  sops-nix,
+  deploy-rs,
   check,
   ...
 }:
@@ -16,12 +17,13 @@ let
     inherit nixpkgs;
     extraProfiles.extra.only = { };
     sharedModules = [
-      hmStub.nixosModules.home-manager
-      sopsStub.nixosModules.sops
+      home-manager.nixosModules.home-manager
+      sops-nix.nixosModules.sops
     ];
+    # stand-ins for home configurations (home-manager wants a stateVersion)
     homes = {
-      desktop-dark = { };
-      terminal-dark = { };
+      desktop-dark.home.stateVersion = "26.05";
+      terminal-dark.home.stateVersion = "26.05";
     };
     users =
       (ftl.lib.mkUsers {
@@ -30,18 +32,10 @@ let
       }).users;
   };
 
-  # stand-in for the deploy-rs flake
-  deployStub = {
-    inputs.nixpkgs = nixpkgs;
-    lib = lib.genAttrs [ "x86_64-linux" "aarch64-linux" ] (system: {
-      activate.nixos = cfg: "activate ${system} ${cfg.config.networking.hostName}";
-    });
-  };
-
   d = ftl.lib.mkDeploy {
     inherit (n) nixosConfigurations;
     hosts = n.fleet.hosts;
-    deploy = deployStub;
+    deploy = deploy-rs;
     sshUser = "admin";
     exclude = [ "gamma" ];
   };
@@ -62,7 +56,7 @@ check "unit-deploy" (
         inherit (d.nodes.alpha) hostname sshUser;
         alias = builtins.elemAt d.nodes.alpha.sshOpts 1;
         strict = lib.last d.nodes.alpha.sshOpts;
-        path = d.nodes.alpha.profiles.system.path;
+        activatable = lib.isDerivation d.nodes.alpha.profiles.system.path;
         known = builtins.readFile d.knownHosts;
       };
       expected = {
@@ -70,7 +64,7 @@ check "unit-deploy" (
         sshUser = "admin";
         alias = "HostKeyAlias=alpha.example.org";
         strict = "StrictHostKeyChecking=yes";
-        path = "activate x86_64-linux alpha";
+        activatable = true;
         known = "alpha.example.org ${n.fleet.hosts.alpha.keys.ssh}\n";
       };
     };

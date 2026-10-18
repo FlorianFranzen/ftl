@@ -1,23 +1,22 @@
-# The checks, for one nixpkgs; tests/flake.nix runs them for stable and unstable.
+# The checks, for one set of inputs; tests/stable and tests/unstable are the
+# flakes that provide them.
 {
   pkgs,
   ftl,
   nixpkgs,
-  # the sops-nix flake, for the services VM test
-  sops-nix ? null,
+  home-manager,
+  sops-nix,
+  comin,
+  deploy-rs,
 }:
 let
   lib = pkgs.lib;
 
   fixture = ./fixtures/layout;
-  hmStub = import ./stubs/home-manager.nix { inherit lib; };
-  sopsStub = import ./stubs/sops-nix.nix;
 
   # inputs as a consumer flake of the fixture would pass them
   inputs = {
-    inherit nixpkgs;
-    home-manager = hmStub;
-    sops-nix = sopsStub;
+    inherit nixpkgs home-manager sops-nix;
     self = {
       outPath = fixture;
       shortRev = "abc1234";
@@ -38,9 +37,11 @@ let
       lib
       ftl
       nixpkgs
+      home-manager
+      sops-nix
+      comin
+      deploy-rs
       fixture
-      hmStub
-      sopsStub
       inputs
       check
       ;
@@ -79,8 +80,6 @@ in
   pipeline = import ./pipeline.nix { inherit pkgs ftl nixpkgs; };
   pipeline-agent = import ./pipeline-agent.nix { inherit pkgs ftl nixpkgs; };
   cache = import ./cache.nix { inherit pkgs ftl nixpkgs; };
-}
-// lib.optionalAttrs (sops-nix != null) {
   # fleet.secrets with sops-nix for real: decryption with the SSH host key
   services = import ./services.nix { inherit pkgs ftl sops-nix; };
 }

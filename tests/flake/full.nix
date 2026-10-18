@@ -92,8 +92,8 @@ check "flake-full" (
     # homes are wired into hosts, with shared home modules and `static`
     testHomesInHost = {
       expr = {
-        variant = alpha.home-manager.evaluated.alice.home.file.variant.text;
-        shared = alpha.home-manager.evaluated.alice.home.file.common.source;
+        variant = alpha.home-manager.users.alice.home.file.variant.text;
+        shared = alpha.home-manager.users.alice.home.file.common.source;
       };
       expected = {
         variant = "dark";

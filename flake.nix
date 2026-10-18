@@ -1,9 +1,10 @@
 {
   description = "ftl - fleet template library: fleet outputs, update pipeline and binary cache for NixOS";
 
-  # The library is pure and needs no inputs.  The test suite is a flake of its
-  # own, tests/flake.nix, with nixpkgs stable and unstable, sops-nix and this
-  # flake as inputs: `nix flake check ./tests`.
+  # The library is pure and needs no inputs.  The test suite lives in two
+  # flakes with their own inputs (nixpkgs, home-manager, sops-nix) and this
+  # flake as a relative input: `nix flake check ./tests/stable` or
+  # `./tests/unstable`.
   inputs = { };
 
   outputs =

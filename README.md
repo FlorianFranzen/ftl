@@ -310,11 +310,13 @@ deploys. Keep these in mind when setting it up.
 
 ## Tests
 
-The library flake has no inputs; the test suite is its own flake,
-`tests/flake.nix`, with nixpkgs stable and unstable, sops-nix and ftl itself
-(a relative input) as inputs. `nix flake check ./tests` runs every test twice,
-as `stable-<name>` and `unstable-<name>`, fully offline once the inputs are
-fetched:
+The library flake has no inputs. The test suite lives in two flakes with the
+same checks, `tests/stable` (nixpkgs `nixos-26.05`, home-manager
+`release-26.05`, sops-nix) and `tests/unstable` (both unstable), each with its
+own lock and ftl as a relative input; `nix flake check ./tests/stable` or
+`./tests/unstable` runs it, fully offline once the inputs are fetched. A canary
+bumps one of them (`nix flake update` in that directory) and runs its check to
+see whether the library still works with the channel's current head:
 
 - `unit-loader`, `unit-static`, `unit-packages`, `unit-home`, `unit-nixos`,
   `unit-users`, `unit-deploy`: each `mk*` called directly on its folder of

@@ -42,8 +42,10 @@ pkgs.testers.runNixOSTest {
       imports = alpha.modules;
 
       networking.hostName = lib.mkForce "machine";
-      # alpha's service state would wait for a disk this VM does not have
+      # alpha's service state would wait for a disk this VM does not have, and
+      # its secrets need a key the VM does not hold
       fleet.state = lib.mkForce { };
+      sops.secrets = lib.mkForce { };
 
       # all paths from the fleet.rootDir defaults
       fleet.builder.enable = true;

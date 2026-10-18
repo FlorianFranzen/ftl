@@ -4,8 +4,9 @@
   ftl,
   nixpkgs,
   fixture,
-  hmStub,
-  sopsStub,
+  home-manager,
+  sops-nix,
+  comin,
   check,
   ...
 }:
@@ -23,8 +24,8 @@ let
     name = "unit";
     inherit (packages) pkgsFor;
     sharedModules = [
-      hmStub.nixosModules.home-manager
-      sopsStub.nixosModules.sops
+      home-manager.nixosModules.home-manager
+      sops-nix.nixosModules.sops
       {
         nixpkgs.overlays = packages.overlays;
         nixpkgs.config = packages.config;
@@ -39,9 +40,10 @@ let
         environment.etc."extra-only".text = "extra";
       };
     };
+    # stand-ins for home configurations (home-manager wants a stateVersion)
     homes = {
-      desktop-dark = { };
-      terminal-dark = { };
+      desktop-dark.home.stateVersion = "26.05";
+      terminal-dark.home.stateVersion = "26.05";
     };
     homeCompanions.desktop-dark = [ { environment.etc."desktop-companion".text = "stub"; } ];
     users =
@@ -372,7 +374,7 @@ check "unit-nixos" (
         };
         # beta decrypts with a dedicated age key; gamma has no store (yet)
         betaAgeKey = (cfg "beta").sops.age.keyFile;
-        gamma = (cfg "gamma").sops.defaultSopsFile;
+        gamma = (cfg "gamma").fleet.secrets.file;
       };
       expected = {
         alpha = {
@@ -530,7 +532,7 @@ check "unit-nixos" (
         (ftl.lib.mkNixos {
           src = fixture + "/nixos";
           inherit nixpkgs;
-          sharedModules = [ hmStub.nixosModules.home-manager ];
+          sharedModules = [ home-manager.nixosModules.home-manager ];
           hosts.gamma.modules = [
             (
               {
@@ -620,6 +622,34 @@ check "unit-nixos" (
         svc.kind = "units";
         tools.kind = "packages";
       };
+    };
+
+    # with comin's module imported and enabled, its post-deployment hook is ftl's
+    testCominHook = {
+      expr =
+        let
+          c =
+            (ftl.lib.mkNixos {
+              inherit nixpkgs;
+              sharedModules = [ comin.nixosModules.comin ];
+              hosts.delta.modules = [
+                {
+                  services.comin = {
+                    enable = true;
+                    remotes = [
+                      {
+                        name = "origin";
+                        url = "https://example.org/fleet.git";
+                        branches.main.name = "main";
+                      }
+                    ];
+                  };
+                }
+              ];
+            }).nixosConfigurations.delta.config;
+        in
+        c.fleet.comin.enable && c.services.comin.postDeploymentCommand == c.fleet.comin.hook;
+      expected = true;
     };
 
     # the old option names still work, with a warning
