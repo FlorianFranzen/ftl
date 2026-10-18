@@ -4,12 +4,14 @@
 #
 #   pkgs/    mkPackages  overlays.default, packages, legacyPackages
 #   nixos/   mkNixos     nixosConfigurations, nixosModules, nixosProfiles, nixosLayers,
-#                        ftlPeers
+#                        fleet.hosts
 #   home/    mkHome      homeModules, homeProfiles, homeConfigurations
 #   static/  mkStatic    the `static` module argument (no outputs)
 #
-# plus checks for all of them and the ftlManifest consumed by the ftl
-# pipeline. Missing folders are skipped; folder names can be changed with
+# plus checks for all of them and `fleet.manifest`, consumed by the ftl
+# pipeline. Everything the library itself exports is below `fleet`; the former
+# `ftlPeers` and `ftlManifest` outputs remain as aliases with a warning.
+# Missing folders are skipped; folder names can be changed with
 # `layout.<family> = "dir"` (or null to disable). Unrecognized arguments are
 # deep-merged into the outputs.
 args@{
@@ -196,11 +198,15 @@ let
         nixosProfiles
         nixosLayers
         ;
-      # host metadata of all hosts (the `peers` module argument)
-      ftlPeers = nixosOut.peers;
+      # host metadata of all hosts (`fleet.hosts` in every host)
+      fleet.hosts = nixosOut.peers;
+      ftlPeers = lib.warn "ftl: the `ftlPeers` output is `fleet.hosts` now" nixosOut.peers;
     })
     (lib.optionalAttrs (checks != { }) { inherit checks; })
-    { ftlManifest = manifest; }
+    {
+      fleet.manifest = manifest;
+      ftlManifest = lib.warn "ftl: the `ftlManifest` output is `fleet.manifest` now" manifest;
+    }
     passthru
   ];
 in

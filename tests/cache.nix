@@ -24,7 +24,7 @@ pkgs.testers.runNixOSTest {
           source = ./fixtures/keys/cache-test.secret;
           mode = "0400";
         };
-        ftl.cache = {
+        fleet.cache = {
           enable = true;
           cacheDir = "/var/lib/cache";
           statusDir = "/var/lib/status";
@@ -40,7 +40,7 @@ pkgs.testers.runNixOSTest {
         nix.settings.experimental-features = [ "nix-command" ];
         # Drop the default substituters so only the ftl cache is consulted.
         nix.settings.substituters = lib.mkForce [ ];
-        ftl.client = {
+        fleet.client = {
           enable = true;
           substituters = [
             {

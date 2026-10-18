@@ -1,4 +1,4 @@
-# ftl.comin: glue between comin (base system deployment) and ftl.
+# fleet.comin: glue between comin (base system deployment) and ftl.
 #
 # comin's postDeploymentCommand runs one ftl hook that
 #   1. on lanzaboote hosts, syncs comin's generation into the default `system`
@@ -16,7 +16,7 @@
   ...
 }:
 let
-  cfg = config.ftl.comin;
+  cfg = config.fleet.comin;
 
   hasComin = options ? services && options.services ? comin;
   hasLanzaboote = options ? boot && options.boot ? lanzaboote;
@@ -53,15 +53,15 @@ let
       fi
     ''}
 
-    ${lib.optionalString (config.ftl.layers.installed != { }) ''
-      ${config.ftl.layers.hook}
+    ${lib.optionalString (config.fleet.layers.installed != { }) ''
+      ${config.fleet.layers.hook}
     ''}
   '';
 in
 {
   imports = [ ./layers.nix ];
 
-  options.ftl.comin = {
+  options.fleet.comin = {
     enable = lib.mkOption {
       type = lib.types.bool;
       default = hasComin && config.services.comin.enable;

@@ -40,9 +40,14 @@ let
   };
 
   cfg = host: n.nixosConfigurations.${host}.config;
-  failsWith = hosts: !(builtins.tryEval (builtins.attrNames (ftl.lib.mkNixos {
-    inherit nixpkgs hosts;
-  }).nixosConfigurations)).success;
+  failsWith =
+    hosts:
+    !(builtins.tryEval (
+      builtins.attrNames
+        (ftl.lib.mkNixos {
+          inherit nixpkgs hosts;
+        }).nixosConfigurations
+    )).success;
 in
 check "unit-nixos" (
   lib.runTests {
@@ -110,8 +115,9 @@ check "unit-nixos" (
       };
     };
 
-    # every host sees all peers (itself included), and can use it in imports
-    testPeersArg = {
+    # every host sees all hosts (itself included) as `fleet.hosts`, itself as
+    # `fleet.self`, and can use them in imports; `peers` is the old name
+    testFleetArg = {
       expr =
         (ftl.lib.mkNixos {
           src = fixture + "/nixos";
@@ -119,14 +125,21 @@ check "unit-nixos" (
           sharedModules = [ hmStub.nixosModules.home-manager ];
           hosts.gamma.modules = [
             (
-              { peers, lib, ... }:
               {
-                imports = lib.optional (peers ? alpha) { environment.etc.peer.text = peers.alpha.fqdn; };
+                fleet,
+                peers,
+                lib,
+                ...
+              }:
+              {
+                imports = lib.optional (fleet.hosts ? alpha) {
+                  environment.etc.peer.text = "${fleet.hosts.alpha.fqdn} ${fleet.self.name} ${peers.alpha.fqdn}";
+                };
               }
             )
           ];
         }).nixosConfigurations.gamma.config.environment.etc.peer.text;
-      expected = "alpha.example.org";
+      expected = "alpha.example.org gamma alpha.example.org";
     };
 
     # explicit host specs carry data too, and `name` is reserved
@@ -194,11 +207,52 @@ check "unit-nixos" (
     };
 
     testLayerWiring = {
-      expr = (cfg "alpha").ftl.layers.installed;
+      expr = (cfg "alpha").fleet.layers.installed;
       expected = {
-        svc.kind = "services";
-        tools.kind = "apps";
+        svc.kind = "units";
+        tools.kind = "packages";
       };
+    };
+
+    # the old option names still work, with a warning
+    testOptionAliases = {
+      expr =
+        let
+          c =
+            (ftl.lib.mkNixos {
+              inherit nixpkgs;
+              hosts.delta.modules = [
+                {
+                  ftl.layers.repo = "file:///old-name";
+                  ftl.client.gc.dates = "monthly";
+                }
+              ];
+            }).nixosConfigurations.delta.config;
+        in
+        {
+          repo = c.fleet.layers.repo;
+          dates = c.fleet.client.gc.dates;
+          warned = builtins.length c.warnings;
+        };
+      expected = {
+        repo = "file:///old-name";
+        dates = "monthly";
+        warned = 1;
+      };
+    };
+
+    # the old kind names of layers are accepted, and normalized
+    testLayerKindAliases = {
+      expr =
+        (ftl.lib.mkNixos {
+          inherit nixpkgs;
+          hosts.delta.layers = [ "old" ];
+          layers.old = {
+            kind = "apps";
+            packages = [ ];
+          };
+        }).nixosConfigurations.delta.config.fleet.layers.installed.old.kind;
+      expected = "packages";
     };
 
     testCheckNames = {
@@ -217,8 +271,8 @@ check "unit-nixos" (
       };
     };
 
-    testFtlArgs = {
-      expr = n.nixosConfigurations.alpha.ftlArgs.specialArgs ? static;
+    testFleetArgs = {
+      expr = n.nixosConfigurations.alpha.fleetArgs.specialArgs ? static;
       expected = true;
     };
 

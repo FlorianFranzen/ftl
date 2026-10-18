@@ -18,6 +18,8 @@
         client = ./modules/client.nix;
         layers = ./modules/layers.nix;
         comin = ./modules/comin.nix;
+        # ftl.* -> fleet.* option aliases
+        compat = ./modules/compat.nix;
         default = {
           imports = [
             self.nixosModules.builder
@@ -25,6 +27,7 @@
             self.nixosModules.client
             self.nixosModules.layers
             self.nixosModules.comin
+            self.nixosModules.compat
           ];
         };
       };

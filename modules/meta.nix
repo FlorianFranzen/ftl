@@ -1,9 +1,9 @@
-# Declares the ftl.meta option. Imported both by the module mkNixos
+# Declares the fleet.meta option. Imported both by the module mkNixos
 # injects into every generated configuration and by the client module; the
 # module system deduplicates path imports, so both can depend on it.
 { lib, ... }:
 {
-  options.ftl.meta = lib.mkOption {
+  options.fleet.meta = lib.mkOption {
     type = lib.types.attrs;
     default = { };
     description = ''

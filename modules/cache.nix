@@ -1,4 +1,4 @@
-# ftl.cache: serve the pipeline's file:// binary cache and status pages
+# fleet.cache: serve the pipeline's file:// binary cache and status pages
 # over HTTP (plain nginx static hosting; NAR signatures carry the trust).
 {
   config,
@@ -6,25 +6,25 @@
   ...
 }:
 let
-  cfg = config.ftl.cache;
-  rootDir = config.ftl.rootDir;
+  cfg = config.fleet.cache;
+  rootDir = config.fleet.rootDir;
 in
 {
   imports = [ ./dirs.nix ];
 
-  options.ftl.cache = {
+  options.fleet.cache = {
     enable = lib.mkEnableOption "the ftl binary cache webserver";
 
     cacheDir = lib.mkOption {
       type = lib.types.path;
       default = "${rootDir}/cache";
-      defaultText = lib.literalExpression ''"''${config.ftl.rootDir}/cache"'';
+      defaultText = lib.literalExpression ''"''${config.fleet.rootDir}/cache"'';
       description = "Directory holding the nix binary cache (narinfo/nar layout).";
     };
     statusDir = lib.mkOption {
       type = lib.types.path;
       default = "${rootDir}/status";
-      defaultText = lib.literalExpression ''"''${config.ftl.rootDir}/status"'';
+      defaultText = lib.literalExpression ''"''${config.fleet.rootDir}/status"'';
       description = "Directory holding pipeline status JSON.";
     };
     port = lib.mkOption {

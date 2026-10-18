@@ -68,7 +68,7 @@ pkgs.testers.runNixOSTest {
         };
       };
 
-      ftl.builder = {
+      fleet.builder = {
         enable = true;
         promote = true;
         sshAuthSock = agentSocket;

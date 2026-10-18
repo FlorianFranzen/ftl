@@ -1,4 +1,4 @@
-# Build the ftlManifest attrset from a normalized host/home table.
+# Build the `fleet.manifest` output from a normalized host/home table.
 #
 # The manifest is the single contract between an environment repo and the
 # ftl pipeline: a plain, JSON-serializable attrset mapping every check

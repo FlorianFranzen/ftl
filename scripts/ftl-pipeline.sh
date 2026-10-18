@@ -1,7 +1,7 @@
 # ftl-pipeline: update one lane of one environment repo, build its manifest
 # attrs, publish results to the binary cache and (optionally) fast-forward the
 # deployed branch, pinning layers that failed to their last green commit. Designed to run as a systemd oneshot; all configuration via FTL_*
-# environment variables (set by the ftl.builder NixOS module).
+# environment variables (set by the fleet.builder NixOS module).
 #
 # Required: FTL_REPO_NAME FTL_REPO_URL FTL_STATE_DIR FTL_STATUS_DIR FTL_SYSTEMS
 # Optional: FTL_BRANCH (main) FTL_LANE (default) FTL_LANE_INPUTS ("" = all)
@@ -223,7 +223,7 @@ if [ -n "${FTL_CACHE_DIR:-}" ]; then
   if [ "${FTL_CACHE_SIGNED:-0}" = 1 ]; then
     cache_url="file://${FTL_CACHE_DIR}?compression=zstd&parallel-compression=true&want-mass-query=true&priority=20"
   else
-    log "no cache signing configured (ftl.builder.cache.secretKeyFile or .signer.command); not pushing to the cache"
+    log "no cache signing configured (fleet.builder.cache.secretKeyFile or .signer.command); not pushing to the cache"
     notify "no cache signing key configured; builds are not pushed to the cache"
   fi
 fi

@@ -1,6 +1,6 @@
 # ftl-status: show the build/promotion state of the environment.
 #
-# Environment (baked in by the ftl.client module):
+# Environment (baked in by the fleet.client module):
 #   FTL_STATUS_URL   URL of the builder's status JSON (optional)
 #   FTL_REPO_URL     git URL (fallback: list promoted refs)
 

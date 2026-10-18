@@ -1,8 +1,8 @@
-# ftl.layers: host side of ftl layers - independently versioned Nix profiles
+# fleet.layers: host side of ftl layers - independently versioned Nix profiles
 # under /nix/var/nix/profiles/layers/<name>, combined with the base system at
 # runtime:
-#   - apps layers are added to environment.profiles (PATH, XDG_DATA_DIRS, ...)
-#   - services layers ship unit files, linked in by a systemd generator, so
+#   - packages layers are added to environment.profiles (PATH, XDG_DATA_DIRS, ...)
+#   - units layers ship unit files, linked in by a systemd generator, so
 #     updating a layer needs only daemon-reload + restart, no system rebuild
 #   - ftl-layers update resolves each layer's revision from ftl-layers.json
 #     at the deployed commit (comin hook) or on a timer
@@ -13,21 +13,23 @@
   ...
 }:
 let
-  cfg = config.ftl.layers;
+  cfg = config.fleet.layers;
   scripts = import ./scripts.nix { inherit pkgs; };
+  kinds = import ../lib/kinds.nix lib;
+  installed = lib.mapAttrs (
+    n: l: l // { kind = kinds.normalize "layer '${n}'" l.kind; }
+  ) cfg.installed;
 
   profileDir = "/nix/var/nix/profiles/layers";
 
-  layerNames = builtins.attrNames cfg.installed;
-  appsLayers = builtins.attrNames (lib.filterAttrs (_: l: l.kind == "apps") cfg.installed);
-  serviceLayers = builtins.attrNames (lib.filterAttrs (_: l: l.kind == "services") cfg.installed);
+  layerNames = builtins.attrNames installed;
+  packageLayers = builtins.attrNames (lib.filterAttrs (_: l: l.kind == "packages") installed);
+  unitLayers = builtins.attrNames (lib.filterAttrs (_: l: l.kind == "units") installed);
 
   toolEnv = lib.filterAttrs (_: v: v != null) {
     FTL_REPO_URL = cfg.repo;
     FTL_SYSTEM = pkgs.stdenv.hostPlatform.system;
-    FTL_LAYERS = lib.concatStringsSep " " (
-      lib.mapAttrsToList (n: l: "${n}:${l.kind}") cfg.installed
-    );
+    FTL_LAYERS = lib.concatStringsSep " " (lib.mapAttrsToList (n: l: "${n}:${l.kind}") installed);
     FTL_STATE_DIR = cfg.stateDir;
     FTL_PROFILE_DIR = profileDir;
     FTL_KEEP_GENERATIONS = toString cfg.keepGenerations;
@@ -49,11 +51,11 @@ let
     exec ${lib.getExe scripts.ftl-layers} "$@"
   '';
 
-  # Link unit files of installed services layers into the generator output
+  # Link unit files of installed units layers into the generator output
   # (/etc/systemd/system is read-only on NixOS). Re-run on daemon-reload.
   generator = pkgs.writeShellScript "ftl-layers-generator" ''
     out="$1"
-    for name in ${lib.escapeShellArgs serviceLayers}; do
+    for name in ${lib.escapeShellArgs unitLayers}; do
       unitdir="${profileDir}/$name/lib/systemd/system"
       [ -d "$unitdir" ] || continue
       for f in "$unitdir"/*; do
@@ -73,16 +75,14 @@ let
   '';
 in
 {
-  options.ftl.layers = {
+  options.fleet.layers = {
     installed = lib.mkOption {
       type = lib.types.attrsOf (
         lib.types.submodule {
           options.kind = lib.mkOption {
-            type = lib.types.enum [
-              "apps"
-              "services"
-            ];
-            default = "apps";
+            # "apps" and "services" are the old names of "packages" and "units"
+            type = lib.types.enum kinds.all;
+            default = "packages";
           };
         }
       );
@@ -154,7 +154,7 @@ in
       type = lib.types.str;
       readOnly = true;
       default = "${ftl-layers}/bin/ftl-layers hook";
-      description = "Command that triggers a layer update for the deployed commit (called by ftl.comin).";
+      description = "Command that triggers a layer update for the deployed commit (called by fleet.comin).";
     };
   };
 
@@ -164,13 +164,13 @@ in
         assertions = [
           {
             assertion = cfg.repo != null;
-            message = "ftl.layers.repo must be set on hosts with layers";
+            message = "fleet.layers.repo must be set on hosts with layers";
           }
         ];
 
-        environment.profiles = lib.mkAfter (map (n: "${profileDir}/${n}") appsLayers);
+        environment.profiles = lib.mkAfter (map (n: "${profileDir}/${n}") packageLayers);
 
-        systemd.generators = lib.mkIf (serviceLayers != [ ]) { ftl-layers = generator; };
+        systemd.generators = lib.mkIf (unitLayers != [ ]) { ftl-layers = generator; };
 
         systemd.tmpfiles.rules = [ "d ${profileDir} 0755 root root -" ];
 

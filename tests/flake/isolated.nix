@@ -30,6 +30,7 @@ check "flake-isolated" (
     testPkgsOnly = {
       expr = outputs "pkgs";
       expected = [
+        "fleet"
         "ftlManifest"
         "legacyPackages"
         "overlays"
@@ -41,6 +42,7 @@ check "flake-isolated" (
       expr = outputs "nixos";
       expected = [
         "checks"
+        "fleet"
         "ftlManifest"
         "ftlPeers"
         "nixosConfigurations"
@@ -59,6 +61,7 @@ check "flake-isolated" (
       expr = outputs "home";
       expected = [
         "checks"
+        "fleet"
         "ftlManifest"
         "homeConfigurations"
         "homeModules"
@@ -75,7 +78,10 @@ check "flake-isolated" (
     # static/ produces no outputs of its own
     testStaticOnly = {
       expr = outputs "static";
-      expected = [ "ftlManifest" ];
+      expected = [
+        "fleet"
+        "ftlManifest"
+      ];
     };
 
     testManifestPerFamily = {
@@ -84,7 +90,7 @@ check "flake-isolated" (
         lib.unique (
           lib.sort lib.lessThan (
             lib.concatMap (s: map (e: e.kind) (builtins.attrValues s)) (
-              builtins.attrValues (only f).ftlManifest.attrs
+              builtins.attrValues (only f).fleet.manifest.attrs
             )
           )
         )

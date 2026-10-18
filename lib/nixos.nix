@@ -6,16 +6,18 @@
 #                             data, visible to every host via `peers`.
 #   nixos/modules/**.nix      imported into every host (nixosModules)
 #   nixos/profiles/**.nix     opt-in modules, available as `profiles` argument
-#   nixos/layers/<name>.nix   layer definitions { kind; packages; services; }
+#   nixos/layers/<name>.nix   layer definitions { kind; packages; units; }
 #
 # Hosts and layers can also be given (or overridden) explicitly. Every host
 # gets ftl's own NixOS modules (all disabled by default) and the meta module.
 #
-# Every host also receives the `peers` module argument: all hosts' metadata,
-# `peers.<name> = { name; system; importance; layers; } // <free-form data>`.
-# It is built from host.nix alone, without evaluating any configuration, so
-# modules can use it anywhere (even in imports) without infinite recursion,
-# e.g. to derive mesh endpoints, scrape targets or DNS records from the host list.
+# Every host also receives the `fleet` module argument: `fleet.hosts.<name> =
+# { name; system; importance; layers; } // <free-form data>` is all hosts'
+# metadata, `fleet.self` the host's own entry. It is built from host.nix alone,
+# without evaluating any configuration, so modules can use it anywhere (even in
+# imports) without infinite recursion, e.g. to derive mesh endpoints, scrape
+# targets or DNS records from the host list. `peers` (= `fleet.hosts`) is the
+# argument's former name.
 {
   src ? null,
   nixpkgs,
@@ -24,7 +26,7 @@
   # hosts.<name> = { system?; importance?; modules?; layers?; } (merged over
   # discovered hosts; modules are appended)
   hosts ? { },
-  # layers.<name> = { kind?; packages?; services?; } (merged over discovered)
+  # layers.<name> = { kind?; packages?; units?; } (merged over discovered)
   layers ? { },
   # system -> package set used to build layers
   pkgsFor ? system: import nixpkgs { inherit system; },
@@ -40,6 +42,7 @@
 let
   lib = nixpkgs.lib;
   loader = import ./loader.nix;
+  kinds = import ./kinds.nix lib;
 
   dir = sub: if src == null then null else src + "/${sub}";
   exists = sub: src != null && builtins.pathExists (dir sub);
@@ -145,7 +148,8 @@ let
     )
   ) layers';
 
-  layerKind = layerName: layers'.${layerName}.kind or "apps";
+  layerKind =
+    layerName: kinds.normalize "layer '${layerName}'" (layers'.${layerName}.kind or "packages");
 
   nixosLayers = lib.genAttrs (lib.unique (lib.flatten (builtins.attrValues layerSystems))) (
     system:
@@ -157,7 +161,8 @@ let
           name = layerName;
           kind = layerKind layerName;
           packages = def.packages or [ ];
-          services = def.services or { };
+          units = def.units or { };
+          services = def.services or null;
         }
       )
       (lib.filterAttrs (layerName: _: builtins.elem system layerSystems.${layerName}) layers')
@@ -172,16 +177,17 @@ let
         ../modules/meta.nix
         ../modules/layers.nix
         ../modules/comin.nix
+        ../modules/compat.nix
       ];
       config = {
-        ftl.meta = {
+        fleet.meta = {
           environment = name;
           inherit repo;
           host = hostName;
           attr = hostName;
           inherit (host) importance system layers;
         };
-        ftl.layers.installed = lib.genAttrs host.layers (l: {
+        fleet.layers.installed = lib.genAttrs host.layers (l: {
           kind = layerKind l;
         });
         networking.hostName = lib.mkDefault hostName;
@@ -197,6 +203,11 @@ let
     ../modules/comin.nix
   ];
 
+  # The fleet as every host sees it; `self` is added per host below.
+  fleet = {
+    hosts = peers;
+  };
+
   specialArgs' = specialArgs // {
     inherit
       profiles
@@ -207,7 +218,7 @@ let
   };
 
   # The exact nixosSystem arguments of every host (also attached to each
-  # configuration as `ftlArgs`, e.g. for building VM tests from a host).
+  # configuration as `fleetArgs`, e.g. for building VM tests from a host).
   systemArgs = builtins.mapAttrs (hostName: host: {
     modules =
       sharedModules
@@ -215,11 +226,20 @@ let
       ++ loader.collectPaths nixosModules
       ++ host.modules
       ++ [ (metaModule hostName host) ];
-    specialArgs = specialArgs';
+    specialArgs = specialArgs' // {
+      fleet = fleet // {
+        self = peers.${hostName};
+      };
+    };
   }) hosts';
 
   nixosConfigurations = builtins.mapAttrs (
-    _: a: nixpkgs.lib.nixosSystem a // { ftlArgs = a; }
+    _: a:
+    nixpkgs.lib.nixosSystem a
+    // {
+      fleetArgs = a;
+      ftlArgs = lib.warn "ftl: `ftlArgs` is called `fleetArgs` now" a;
+    }
   ) systemArgs;
 
   # --- checks and manifest ---------------------------------------------------
@@ -274,6 +294,7 @@ assert builtins.all builtins.isAttrs (builtins.attrValues hosts');
     checks
     manifestEntries
     peers
+    fleet
     ;
   hosts = hosts';
 }
