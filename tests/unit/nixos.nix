@@ -118,6 +118,7 @@ check "unit-nixos" (
             "alice"
             "bob"
           ];
+          generators = [ "host-keys" ];
           keys = {
             ssh = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO7pFvyv5FcmP7vj/Q0OeeOBecLE9K/75Qch2uR6eRSl";
             initrd = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKODezmkKcdWZ4strBZey4HXGUlIdwQZ5CtDzbAzqvMZ";
@@ -132,6 +133,7 @@ check "unit-nixos" (
           layers = [ "tools" ];
           services = [ "mesh" ];
           users = [ "alice" ];
+          generators = [ "host-keys" ];
           keys.age = "age1880pyzlyypv0cmec6e3tgwww9tgum9cywqn5743flkdz6krlxy2sksedxt";
         };
         gamma = {
@@ -141,8 +143,43 @@ check "unit-nixos" (
           layers = [ "tools" ];
           services = [ "mesh" ];
           users = [ "alice" ];
+          generators = [ "host-keys" ];
         };
       };
+    };
+
+    # ftl's generators and the repository's, what they make
+    testGenerators = {
+      expr = {
+        names = builtins.attrNames n.generators;
+        token = n.generators.token.files;
+        identity = builtins.attrNames (
+          lib.filterAttrs (_: f: f.store or "" == "identity") n.generators.host-keys.files
+        );
+      };
+      expected = {
+        names = [
+          "age-key"
+          "host-keys"
+          "token"
+        ];
+        token = {
+          "token.pub" = { };
+          secret.secret = true;
+        };
+        identity = [
+          "initrd_ssh_host_ed25519_key"
+          "ssh_host_ed25519_key"
+        ];
+      };
+    };
+    testUndefinedGenerator = {
+      expr =
+        !(builtins.tryEval (builtins.attrNames (ftl.lib.mkNixos {
+          inherit nixpkgs;
+          hosts.delta.generators = [ "nope" ];
+        }).hosts)).success;
+      expected = true;
     };
 
     # service.nix is metadata: hosts (or roles), layers, free-form data

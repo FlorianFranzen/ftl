@@ -60,8 +60,10 @@ in
   flake-isolated = import ./flake/isolated.nix args;
   flake-full = import ./flake/full.nix args;
 
-  # 4. the fleet-sops check of the fixture: fleetl renders its committed .sops.yaml
+  # 4. the fleet-sops check of the fixture: fleetl renders its committed .sops.yaml;
+  #    the generators write what they declare
   cli = import ./cli.nix args;
+  generators = import ./generators.nix args;
 
   # 5. VM tests
   modules = import ./modules.nix args;

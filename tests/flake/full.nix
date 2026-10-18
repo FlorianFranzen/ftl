@@ -174,6 +174,7 @@ check "flake-full" (
       };
       expected = {
         names = [
+          "generators"
           "hosts"
           "manifest"
           "services"
@@ -189,6 +190,9 @@ check "flake-full" (
       expected = [
         "extra"
         "fleetl"
+        "generate-age-key"
+        "generate-host-keys"
+        "generate-token"
         "hello-ftl"
         "unfree-ftl"
       ];

@@ -263,8 +263,16 @@ let
       fleet.users = nixosOut.users;
       # every secret store and its recipients, for `fleetl secrets sync`
       fleet.sops = sopsOut;
+      # the generators as programs (fleetl host generate), and what they make
+      fleet.generators = nixosOut.generators;
       # the admin's command line (nix run .#fleetl -- ...), ftl as alias
-      packages = lib.genAttrs systems (system: { fleetl = fleetlFor system; });
+      packages = lib.genAttrs systems (
+        system:
+        {
+          fleetl = fleetlFor system;
+        }
+        // lib.mapAttrs' (name: p: lib.nameValuePair "generate-${name}" p) (nixosOut.generatorPrograms system)
+      );
       apps = lib.genAttrs systems (system: {
         fleetl = {
           type = "app";

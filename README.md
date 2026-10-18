@@ -100,14 +100,37 @@ Missing folders are skipped. Folder names can be changed with
   its module is imported into every host and `fleet.secrets` points it at the
   host's store and key; a service module reaches its own store as
   `service.sopsFile`.
+- **Generators** make a host's keys. `nixos/generators/<name>.nix` is
+  `{ pkgs }: { files; script; runtimeInputs; }`: the script writes the `files`
+  into `$out`; public ones land next to `host.nix` (every `<name>.pub` there is
+  `fleet.hosts.<h>.keys.<name>`), secret ones go into `secrets.yaml` as
+  `<generator>/<file>` or, with `store = "identity"`, into `identity.yaml`.
+  `host.nix` lists the generators a host uses (`generators`; `host-keys`, the
+  SSH host and initrd keys, by default; `age-key` for a dedicated age key).
+  `fleetl host init` runs them, `fleetl host generate <host>` runs the ones
+  whose files are missing later (`--force` for all of them), and
+  `packages.<sys>.generate-<name>` is each one as a program.
+
+  ```nix
+  # nixos/generators/wireguard.nix
+  { pkgs }: {
+    runtimeInputs = [ pkgs.wireguard-tools ];
+    files = { "wireguard.pub" = { }; private = { secret = true; }; };
+    script = ''
+      wg genkey > "$out/private"
+      wg pubkey < "$out/private" > "$out/wireguard.pub"
+    '';
+  }
+  ```
 - **`fleetl`** (alias `ftl`; `nix run .#fleetl -- …`, or `packages.<sys>.fleetl`
   in a dev shell) is the fleet from the admin's machine, inside the repository:
 
   ```
   fleetl secrets sync [--check]   .sops.yaml from the layout, re-key the stores
   fleetl secrets edit <store>     sops on a store
-  fleetl host init <name>         a host folder with fresh host keys: ssh.pub,
-                                  initrd.pub, identity.yaml (--age-key: a sops.age too)
+  fleetl host init <name>         a host folder, its generators run (--age-key:
+                                  a dedicated age key too)
+  fleetl host generate <name>     the host's generators whose files are missing
   fleetl host install <name> <target> [--disk-key] [-- <nixos-anywhere args>]
                                   nixos-anywhere with the identity in place
   fleetl host show | service show | user show <name>

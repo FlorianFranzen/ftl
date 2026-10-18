@@ -4,11 +4,18 @@
 #                             { system?; importance?; layers?; ... }, not a
 #                             module. Any further attributes are free-form host
 #                             data, visible to every host via `fleet.hosts`.
-#                             ssh.pub and initrd.pub next to it are the host's
-#                             SSH host keys (`keys.ssh`, `keys.initrd`), sops.age
-#                             an age recipient used instead of the SSH key
-#                             (`keys.age`), secrets.yaml its secret store and
-#                             identity.yaml its private host keys (admins only).
+#                             every <name>.pub next to it is a public key of the
+#                             host (`keys.<name>`: ssh.pub, initrd.pub, wireguard.pub,
+#                             ...), sops.age an age recipient used instead of the
+#                             SSH key (`keys.age`), secrets.yaml its secret store
+#                             and identity.yaml its private host keys (admins only).
+#   nixos/generators/<name>.nix
+#                             how to make a set of files for a host ({ pkgs }:
+#                             { files; script; runtimeInputs; }): public ones
+#                             land next to host.nix, secret ones in its stores.
+#                             host.nix lists the generators a host uses
+#                             (`generators`, host-keys by default); `fleetl host
+#                             generate` runs them.
 #   nixos/modules/**.nix      imported into every host (nixosModules)
 #   nixos/profiles/**.nix     opt-in modules, available as `profiles` argument
 #   nixos/layers/<name>.nix   layer definitions { kind; packages; units; }
@@ -108,7 +115,11 @@ let
             lib.optionalAttrs (builtins.pathExists (hostDir + "/${file}") && lines != [ ]) {
               ${attr} = builtins.head lines;
             };
-          keys = (meta.keys or { }) // key "ssh.pub" "ssh" // key "initrd.pub" "initrd" // key "sops.age" "age";
+          pubFiles = lib.filterAttrs (n: t: t == "regular" && lib.hasSuffix ".pub" n) (builtins.readDir hostDir);
+          keys =
+            (meta.keys or { })
+            // lib.concatMapAttrs (n: _: key n (lib.removeSuffix ".pub" n)) pubFiles
+            // key "sops.age" "age";
         in
         meta
         // lib.optionalAttrs (keys != { }) { inherit keys; }
@@ -134,6 +145,51 @@ let
     discoveredHosts
     hosts
   ];
+
+  # --- generators --------------------------------------------------------------
+  # ftl's own (the host keys every host needs, a dedicated age key) under the
+  # repository's nixos/generators.
+  generatorFiles = {
+    host-keys = ./generators/host-keys.nix;
+    age-key = ./generators/age-key.nix;
+  }
+  // loader.loadTreeIfExists { dir = dir "generators"; };
+
+  # What a generator makes, without a package set (`fleet.generators`).
+  generators = builtins.mapAttrs (
+    name: file:
+    let
+      g = import file { pkgs = throw "ftl: generator '${name}' may use pkgs only in runtimeInputs"; };
+    in
+    {
+      inherit (g) files;
+      description = g.description or name;
+    }
+  ) generatorFiles;
+
+  # generate-<name> <dir>: the generator as a program, writing its files into <dir>.
+  generatorPrograms =
+    system:
+    let
+      pkgs = pkgsFor system;
+    in
+    builtins.mapAttrs (
+      name: file:
+      let
+        g = import file { inherit pkgs; };
+      in
+      pkgs.writeShellApplication {
+        name = "generate-${name}";
+        runtimeInputs = g.runtimeInputs or [ ];
+        text = ''
+          out="''${1:?usage: generate-${name} <dir>}"
+          HOST="''${HOST:-host}"
+          export HOST out
+          mkdir -p "$out"
+          ${g.script}
+        '';
+      }
+    ) generatorFiles;
 
   # --- services --------------------------------------------------------------
   discoveredServices =
@@ -457,6 +513,7 @@ let
     "services"
     "users"
     "dir"
+    "generators"
   ];
 
   normalizeHost =
@@ -473,10 +530,12 @@ let
         );
         services = builtins.attrNames ownServices;
         users = builtins.attrNames (usersOf hostName);
+        generators = spec.generators or [ "host-keys" ];
         dir = spec.dir or null;
         data = builtins.removeAttrs spec reservedHostAttrs;
       };
       unknownLayers = lib.filter (l: !(layers' ? ${l})) (spec.layers or [ ]);
+      unknownGenerators = lib.filter (g: !(generatorFiles ? ${g})) host.generators;
     in
     assert lib.assertMsg (!(spec ? name))
       "ftl: host '${hostName}' sets reserved attribute 'name' (the directory name is the host name)";
@@ -486,6 +545,8 @@ let
       "ftl: host '${hostName}' uses undefined layers: ${toString unknownLayers}";
     assert lib.assertMsg (!lib.hasPrefix "layer-" hostName)
       "ftl: host name '${hostName}' collides with layer check names (nixos-layer-*)";
+    assert lib.assertMsg (unknownGenerators == [ ])
+      "ftl: host '${hostName}' uses undefined generators: ${toString unknownGenerators}";
     host;
 
   hosts' = builtins.mapAttrs normalizeHost hostSpecs;
@@ -502,6 +563,7 @@ let
         layers
         services
         users
+        generators
         ;
     }
   ) hosts';
@@ -684,6 +746,8 @@ assert builtins.all builtins.isAttrs (builtins.attrValues users');
     peers
     fleet
     sops
+    generators
+    generatorPrograms
     ;
   hosts = hosts';
   services = serviceInfo;
