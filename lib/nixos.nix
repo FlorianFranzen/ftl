@@ -363,6 +363,7 @@ let
     ../modules/client.nix
     ../modules/layers.nix
     ../modules/comin.nix
+    ../modules/state.nix
   ];
 
   # The fleet as every host sees it; `self` is added per host below.

@@ -124,6 +124,14 @@ Three things live under `nixos/` besides hosts, and they are easy to mix up:
   every service as `fleet.services.<name>`, and its own as `fleet.self.services`;
   `nixosServices.<name>` is the service as a plain module for any other
   configuration. `home.nix` in a service folder is reserved for its home side.
+- **State** (`fleet.state.<name> = { path; kind; units; service; }`) is what a
+  host keeps: each entry is a btrfs subvolume (`@apps/<name>`, `@data/<name>` on
+  `fleet.storage.btrfsDevice`) or ZFS dataset (`<pool>/apps/<name>`, on
+  `fleet.storage.zfsPool`), created on demand and mounted at `path` by a mount
+  unit its `units` wait for, so the root filesystem stays disposable. `kind =
+  "state"` is small and precious (snapshotted, backed up by default), `"data"`
+  bulk and re-obtainable. An entry declared by a service module with `service =
+  service.name` moves with the service: its declaration, and its contents.
 
 - **Layers** (`nixos/layers/<name>.nix`, `{ kind; packages = pkgs: [ … ]; units; }`)
   are independently versioned Nix profiles under

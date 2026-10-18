@@ -177,6 +177,41 @@ check "unit-nixos" (
       expected.tools.kind = "packages";
     };
 
+    # fleet.state: a subvolume per entry, mounted by a mount unit its units wait for
+    testState = {
+      expr =
+        let
+          c = cfg "alpha";
+          mount = lib.findFirst (m: m.where == "/var/lib/web") null c.systemd.mounts;
+        in
+        {
+          locations = lib.mapAttrs (_: e: e.location) c.fleet.state;
+          backup = lib.mapAttrs (_: e: e.backup) c.fleet.state;
+          service = c.fleet.state.web.service;
+          mount = {
+            inherit (mount) what type options;
+          };
+          requires = c.systemd.services.web.unitConfig.RequiresMountsFor;
+        };
+      expected = {
+        locations = {
+          web = "@apps/web";
+          web-cache = "@data/web-cache";
+        };
+        backup = {
+          web = true;
+          web-cache = false;
+        };
+        service = "web";
+        mount = {
+          what = "/dev/disk/by-label/root";
+          type = "btrfs";
+          options = "subvol=@apps/web,compress=zstd,noatime";
+        };
+        requires = [ "/var/lib/web" ];
+      };
+    };
+
     # nixosServices.<name> is the service as a module for any configuration;
     # roles come from that configuration's host name
     testServicesExport = {
