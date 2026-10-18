@@ -1,7 +1,10 @@
+# The checks, for one nixpkgs; tests/flake.nix runs them for stable and unstable.
 {
   pkgs,
   ftl,
   nixpkgs,
+  # the sops-nix flake, for the services VM test
+  sops-nix ? null,
 }:
 let
   lib = pkgs.lib;
@@ -74,4 +77,8 @@ in
   pipeline = import ./pipeline.nix { inherit pkgs ftl nixpkgs; };
   pipeline-agent = import ./pipeline-agent.nix { inherit pkgs ftl nixpkgs; };
   cache = import ./cache.nix { inherit pkgs ftl nixpkgs; };
+}
+// lib.optionalAttrs (sops-nix != null) {
+  # fleet.secrets with sops-nix for real: decryption with the SSH host key
+  services = import ./services.nix { inherit pkgs ftl sops-nix; };
 }

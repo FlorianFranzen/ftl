@@ -17,10 +17,13 @@ let
       environment.etc."extra-only".text = "extra";
     };
     home = {
-      bases.desktop = [
-        "terminal"
-        "desktop"
-      ];
+      bases = {
+        terminal = [ "terminal" ];
+        desktop = [
+          "terminal"
+          "desktop"
+        ];
+      };
       username = "alice";
     };
   };

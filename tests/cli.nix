@@ -11,10 +11,13 @@
   inherit inputs;
   name = "cli";
   home = {
-    bases.desktop = [
-      "terminal"
-      "desktop"
-    ];
+    bases = {
+      terminal = [ "terminal" ];
+      desktop = [
+        "terminal"
+        "desktop"
+      ];
+    };
     username = "alice";
   };
   sops.extraRules = [

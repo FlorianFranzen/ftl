@@ -1,14 +1,13 @@
 {
-  description = "flake template library - fleet outputs, update pipeline and binary cache for NixOS";
+  description = "ftl - fleet template library: fleet outputs, update pipeline and binary cache for NixOS";
 
-  # Only used by the test suite (checks); the library itself is pure.
-  # Consumers should add: inputs.ftl.inputs.nixpkgs.follows = "nixpkgs";
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-  # Development note: lock is intentionally pinned to the same rev as the
-  # primary consumer (nixrc) so local test runs share its store.
+  # The library is pure and needs no inputs.  The test suite is a flake of its
+  # own, tests/flake.nix, with nixpkgs stable and unstable, sops-nix and this
+  # flake as inputs: `nix flake check ./tests`.
+  inputs = { };
 
   outputs =
-    { self, nixpkgs }:
+    { self }:
     {
       lib = import ./lib;
 
@@ -41,12 +40,6 @@
       templates.minimal = {
         path = ./templates/minimal;
         description = "Minimal ftl-based infrastructure repository";
-      };
-
-      checks.x86_64-linux = import ./tests {
-        pkgs = nixpkgs.legacyPackages.x86_64-linux;
-        ftl = self;
-        inherit nixpkgs;
       };
     };
 }
