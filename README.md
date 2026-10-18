@@ -9,7 +9,7 @@ family, handled by its own `mk*` function that only looks at that folder;
 | Root folder | Contents | Function | Flake outputs |
 |---|---|---|---|
 | `pkgs/` | `<name>/package.nix` (nixpkgs by-name shape; patches, scripts and `test.nix` next to it); optional `overlay.nix` (overrides, kernel modules, anything else; may use any other subfolder); optional `config.nix` (nixpkgs config, e.g. the unfree allow-list) | `mkPackages` | `overlays.default`, `packages.<sys>` (the `<name>/package.nix` packages available on that system), `legacyPackages.<sys>` (the full package set, shared by everything else) |
-| `nixos/` | `hosts/<name>/*.nix` (modules of a host; `host.nix` is metadata `{ system; importance; layers; … }`, not a module; further attributes are free-form host data); `modules/**.nix` (imported into every host); `profiles/**.nix` (opt-in via the `profiles` argument); `layers/<name>.nix` (layers, see below) | `mkNixos` | `nixosConfigurations`, `nixosModules`, `nixosProfiles`, `nixosLayers.<sys>.<name>`, `fleet.hosts`; checks `nixos-<host>`, `nixos-layer-<name>` |
+| `nixos/` | `hosts/<name>/*.nix` (modules of a host; `host.nix` is metadata `{ system; importance; layers; … }`, not a module; further attributes are free-form host data); `modules/**.nix` (imported into every host); `profiles/**.nix` (opt-in via the `profiles` argument); `layers/<name>.nix` (layers, see below); `services/<name>/*.nix` (services, see below; `service.nix` is metadata `{ hosts; roles; layers; … }`) | `mkNixos` | `nixosConfigurations`, `nixosModules`, `nixosProfiles`, `nixosLayers.<sys>.<name>`, `nixosServices.<name>`, `fleet.hosts`, `fleet.services`; checks `nixos-<host>`, `nixos-layer-<name>` |
 | `home/` | `modules/**.nix` (shared into every configuration); `profiles/<dir>/*.nix` (building blocks); `variants/*.nix` | `mkHome` | `homeModules`, `homeProfiles`, `homeConfigurations.<name>`, `legacyPackages.<sys>.homeConfigurations.<name>`; checks `home-<name>` |
 | `static/` | any files and folders (wallpapers, complete config dirs, …) | `mkStatic` | none; available as the module argument `static` |
 
@@ -95,7 +95,35 @@ outputs = { self, nixpkgs, ftl, home-manager, ... }@inputs:
   };
 ```
 
-## Fleet: layers, pipeline, cache
+## Fleet: services, layers, pipeline, cache
+
+Three things live under `nixos/` besides hosts, and they are easy to mix up:
+
+| | unit of | delivered by |
+|---|---|---|
+| **service** (`nixos/services/<name>/`) | placement: where something runs, with its data (and, later, its secrets and state) | the hosts' NixOS configurations: modules, rebuilt with the system |
+| **layer** (`nixos/layers/<name>.nix`) | independent delivery: an update without a system rebuild | a Nix profile under `/nix/var/nix/profiles/layers/` |
+| **profile** (`nixos/profiles/**.nix`) | reuse: a building block | imported by hosts and services through `profiles` |
+
+- **Services** are folders of NixOS modules with a `service.nix` that says where
+  they run:
+
+  ```nix
+  # nixos/services/mail/service.nix
+  { hosts = [ "darwin" ]; names = [ "mail.example.org" ]; }
+
+  # nixos/services/tang/service.nix: two sides of one service
+  { roles.server.hosts = [ "a" "b" ]; roles.client.hosts = [ "c" ]; layers = [ "tools" ]; }
+  ```
+
+  `hosts` is short for `roles.default.hosts`. Moving a service is editing that
+  line. Its modules are imported on its hosts only and get the `service`
+  argument: the metadata (`name`, `hosts`, `roles`, `layers`, free-form data
+  such as `names` above), `role` (this host's roles in it) and `dir` (its
+  folder). Layers a service lists are installed on its hosts. Every host sees
+  every service as `fleet.services.<name>`, and its own as `fleet.self.services`;
+  `nixosServices.<name>` is the service as a plain module for any other
+  configuration. `home.nix` in a service folder is reserved for its home side.
 
 - **Layers** (`nixos/layers/<name>.nix`, `{ kind; packages = pkgs: [ … ]; units; }`)
   are independently versioned Nix profiles under

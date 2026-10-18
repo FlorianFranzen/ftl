@@ -4,7 +4,7 @@
 #
 #   pkgs/    mkPackages  overlays.default, packages, legacyPackages
 #   nixos/   mkNixos     nixosConfigurations, nixosModules, nixosProfiles, nixosLayers,
-#                        fleet.hosts
+#                        nixosServices, fleet.hosts, fleet.services
 #   home/    mkHome      homeModules, homeProfiles, homeConfigurations
 #   static/  mkStatic    the `static` module argument (no outputs)
 #
@@ -29,7 +29,7 @@ args@{
   # nixpkgs config; defaults to pkgs/config.nix
   config ? null,
   # mkNixos options: specialArgs, sharedModules, extraProfiles, exportInputs,
-  # hosts, layers
+  # hosts, layers, services
   nixos ? { },
   # mkHome options: bases, variants, systems, sharedModules, extraSpecialArgs,
   # username
@@ -137,6 +137,7 @@ let
         inherit (packages) pkgsFor;
         hosts = nixos.hosts or { };
         layers = nixos.layers or { };
+        services = nixos.services or { };
         specialArgs = nixos.specialArgs or { };
         extraProfiles = nixos.extraProfiles or { };
         homes = if homeOut != null then homeOut.modules else { };
@@ -197,9 +198,12 @@ let
         nixosModules
         nixosProfiles
         nixosLayers
+        nixosServices
         ;
-      # host metadata of all hosts (`fleet.hosts` in every host)
+      # metadata of all hosts and services (`fleet.hosts` and `fleet.services`
+      # in every host)
       fleet.hosts = nixosOut.peers;
+      fleet.services = nixosOut.services;
       ftlPeers = lib.warn "ftl: the `ftlPeers` output is `fleet.hosts` now" nixosOut.peers;
     })
     (lib.optionalAttrs (checks != { }) { inherit checks; })

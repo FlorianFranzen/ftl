@@ -80,7 +80,8 @@ check "unit-nixos" (
         gamma = {
           system = "x86_64-linux";
           importance = "required";
-          layers = [ ];
+          # from its service (mesh)
+          layers = [ "tools" ];
         };
       };
     };
@@ -97,6 +98,10 @@ check "unit-nixos" (
             "tools"
             "svc"
           ];
+          services = [
+            "mesh"
+            "web"
+          ];
           fqdn = "alpha.example.org";
           roles = [ "web" ];
         };
@@ -105,14 +110,108 @@ check "unit-nixos" (
           system = "aarch64-linux";
           importance = "optional";
           layers = [ "tools" ];
+          services = [ "mesh" ];
         };
         gamma = {
           name = "gamma";
           system = "x86_64-linux";
           importance = "required";
-          layers = [ ];
+          layers = [ "tools" ];
+          services = [ "mesh" ];
         };
       };
+    };
+
+    # service.nix is metadata: hosts (or roles), layers, free-form data
+    testServices = {
+      expr = n.services;
+      expected = {
+        web = {
+          name = "web";
+          hosts = [ "alpha" ];
+          roles.default.hosts = [ "alpha" ];
+          layers = [ ];
+          port = 8080;
+        };
+        mesh = {
+          name = "mesh";
+          hosts = [
+            "alpha"
+            "beta"
+            "gamma"
+          ];
+          roles = {
+            hub.hosts = [ "alpha" ];
+            spoke.hosts = [
+              "beta"
+              "gamma"
+            ];
+          };
+          layers = [ "tools" ];
+        };
+      };
+    };
+
+    # a service's modules are imported on its hosts only, with the `service`
+    # argument: its metadata and the host's roles in it
+    testServiceModules = {
+      expr = {
+        alphaWeb = (cfg "alpha").environment.etc."service-web".text;
+        alphaMesh = (cfg "alpha").environment.etc."service-mesh".text;
+        betaMesh = (cfg "beta").environment.etc."service-mesh".text;
+        betaWeb = (cfg "beta").environment.etc ? "service-web";
+        meta = (cfg "gamma").fleet.meta.services;
+      };
+      expected = {
+        alphaWeb = "web:8080:alpha:mesh,web";
+        alphaMesh = "hub:beta,gamma";
+        betaMesh = "spoke:beta,gamma";
+        betaWeb = false;
+        meta = [ "mesh" ];
+      };
+    };
+
+    # a service's layers are installed on its hosts
+    testServiceLayers = {
+      expr = (cfg "gamma").fleet.layers.installed;
+      expected.tools.kind = "packages";
+    };
+
+    # nixosServices.<name> is the service as a module for any configuration;
+    # roles come from that configuration's host name
+    testServicesExport = {
+      expr =
+        let
+          c =
+            (ftl.lib.mkNixos {
+              inherit nixpkgs;
+              hosts = {
+                delta.modules = [ n.nixosServices.mesh ];
+                beta.modules = [ n.nixosServices.mesh ];
+              };
+            }).nixosConfigurations;
+        in
+        {
+          delta = c.delta.config.environment.etc."service-mesh".text;
+          beta = c.beta.config.environment.etc."service-mesh".text;
+        };
+      expected = {
+        delta = ":beta,gamma";
+        beta = "spoke:beta,gamma";
+      };
+    };
+
+    testServiceUnknownHost = {
+      expr =
+        !(builtins.tryEval (
+          builtins.attrNames
+            (ftl.lib.mkNixos {
+              inherit nixpkgs;
+              hosts.delta = { };
+              services.x.hosts = [ "nope" ];
+            }).services
+        )).success;
+      expected = true;
     };
 
     # every host sees all hosts (itself included) as `fleet.hosts`, itself as

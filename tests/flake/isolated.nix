@@ -49,6 +49,7 @@ check "flake-isolated" (
         "nixosLayers"
         "nixosModules"
         "nixosProfiles"
+        "nixosServices"
       ];
     };
     # a host needing nothing from the other folders still evaluates

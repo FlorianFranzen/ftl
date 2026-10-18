@@ -68,6 +68,7 @@ check "flake-full" (
         "nixosLayers"
         "nixosModules"
         "nixosProfiles"
+        "nixosServices"
         "overlays"
         "packages"
       ];
@@ -169,6 +170,7 @@ check "flake-full" (
         names = [
           "hosts"
           "manifest"
+          "services"
         ];
         alpha = "alpha.example.org";
       };
