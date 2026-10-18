@@ -74,6 +74,41 @@ Missing folders are skipped. Folder names can be changed with
   (and `initrd.pub`) into `known_hosts`. Everything there is `mkDefault`.
   A fleet with one person is `users/me/{user.nix,ssh.pub}` with
   `{ admin = true; }`.
+- **Secrets** live next to what they belong to, one sops store each, and who
+  can read a store follows from the layout:
+
+  | store | readers |
+  |---|---|
+  | `nixos/hosts/<h>/secrets.yaml` | the host, the admins |
+  | `nixos/hosts/<h>/identity.yaml` (its private host keys, for installs) | the admins |
+  | `nixos/services/<s>/secrets.yaml` | its hosts, the admins, the users listing the service |
+  | `users/<u>/secrets.yaml` | that user |
+
+  A host is a recipient through its SSH host key (`ssh.pub`, converted with
+  ssh-to-age), or through the age recipient in a `sops.age` next to it, which
+  then decrypts from `/var/lib/sops-nix/key.txt`; a user through `sops.pgp`
+  and `sops.age`. The stores and their recipients are the `fleet.sops` output;
+  `fleetl secrets sync` writes `.sops.yaml` from it (`sops.extraRules` in
+  `mkFlake` appends rules of your own). When the flake has a `sops-nix` input,
+  its module is imported into every host and `fleet.secrets` points it at the
+  host's store and key; a service module reaches its own store as
+  `service.sopsFile`.
+- **`fleetl`** (alias `ftl`; `nix run .#fleetl -- …`, or `packages.<sys>.fleetl`
+  in a dev shell) is the fleet from the admin's machine, inside the repository:
+
+  ```
+  fleetl secrets sync [--check]   .sops.yaml from the layout, re-key the stores
+  fleetl secrets edit <store>     sops on a store
+  fleetl host init <name>         a host folder with fresh host keys: ssh.pub,
+                                  initrd.pub, identity.yaml (--age-key: a sops.age too)
+  fleetl host install <name> <target> [--disk-key] [-- <nixos-anywhere args>]
+                                  nixos-anywhere with the identity in place
+  fleetl host show | service show | user show <name>
+  fleetl user init <name> [--admin] [--ssh-key <file>] [--pgp <fpr>] [--age <recipient>]
+  ```
+
+  The check `fleet-sops` fails when `.sops.yaml` is not what `secrets sync`
+  would write.
 - **Static files** are a lookup, not an installer. A file's key is its name
   without its last extension: `static/wallpapers/nixish-dark.png` becomes
   `static.wallpapers.nixish-dark`. Every directory also has an `outPath`, so

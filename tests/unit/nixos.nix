@@ -5,6 +5,7 @@
   nixpkgs,
   fixture,
   hmStub,
+  sopsStub,
   check,
   ...
 }:
@@ -17,11 +18,13 @@ let
 
   n = ftl.lib.mkNixos {
     src = fixture + "/nixos";
+    root = fixture;
     inherit nixpkgs static;
     name = "unit";
     inherit (packages) pkgsFor;
     sharedModules = [
       hmStub.nixosModules.home-manager
+      sopsStub.nixosModules.sops
       {
         nixpkgs.overlays = packages.overlays;
         nixpkgs.config = packages.config;
@@ -112,8 +115,8 @@ check "unit-nixos" (
             "bob"
           ];
           keys = {
-            ssh = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAlphaHost0000000000000000000000000000000000000";
-            initrd = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAlphaInitrd00000000000000000000000000000000000";
+            ssh = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO7pFvyv5FcmP7vj/Q0OeeOBecLE9K/75Qch2uR6eRSl";
+            initrd = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKODezmkKcdWZ4strBZey4HXGUlIdwQZ5CtDzbAzqvMZ";
           };
           fqdn = "alpha.example.org";
           roles = [ "web" ];
@@ -125,6 +128,7 @@ check "unit-nixos" (
           layers = [ "tools" ];
           services = [ "mesh" ];
           users = [ "alice" ];
+          keys.age = "age1880pyzlyypv0cmec6e3tgwww9tgum9cywqn5743flkdz6krlxy2sksedxt";
         };
         gamma = {
           name = "gamma";
@@ -249,7 +253,7 @@ check "unit-nixos" (
           uid = 1000;
           extraGroups = [ "wheel" ];
           keys = [
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAlice000000000000000000000000000000000000000 alice@laptop"
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHW437gdXlD8N84nBJqtbi36N1kia4RepapKRaxqlor6 alice"
           ];
         };
         bobGroups = [ "video" ];
@@ -271,6 +275,95 @@ check "unit-nixos" (
         };
         home = true;
       };
+    };
+
+    # secrets: the host store through sops-nix, a service's through `service.sopsFile`
+    testSecrets = {
+      expr = {
+        alpha = {
+          file = (cfg "alpha").sops.defaultSopsFile;
+          ageKey = (cfg "alpha").sops.age.keyFile;
+          token = (cfg "alpha").sops.secrets."web/token".sopsFile;
+        };
+        # beta decrypts with a dedicated age key; gamma has no store (yet)
+        betaAgeKey = (cfg "beta").sops.age.keyFile;
+        gamma = (cfg "gamma").sops.defaultSopsFile;
+      };
+      expected = {
+        alpha = {
+          file = fixture + "/nixos/hosts/alpha/secrets.yaml";
+          ageKey = null;
+          token = fixture + "/nixos/services/web/secrets.yaml";
+        };
+        betaAgeKey = "/var/lib/sops-nix/key.txt";
+        gamma = null;
+      };
+    };
+
+    # every store with its recipients: hosts by SSH key (or age override),
+    # users by their sops keys; stores nobody could read are left out
+    testStores = {
+      expr = map (s: {
+        inherit (s) path kind;
+        r = s.recipients;
+      }) n.sops.stores;
+      expected =
+        let
+          alice = "age18jlex7sq6yufhk48ljzs5uzxrtazqrchddanezf7w5gl48nccv7sflpg7l";
+          alphaSsh = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO7pFvyv5FcmP7vj/Q0OeeOBecLE9K/75Qch2uR6eRSl";
+          betaAge = "age1880pyzlyypv0cmec6e3tgwww9tgum9cywqn5743flkdz6krlxy2sksedxt";
+          r = age: ssh: {
+            pgp = [ ];
+            inherit age ssh;
+          };
+        in
+        [
+          {
+            path = "nixos/hosts/alpha/identity.yaml";
+            kind = "identity";
+            r = r [ alice ] [ ];
+          }
+          {
+            path = "nixos/hosts/alpha/secrets.yaml";
+            kind = "host";
+            r = r [ alice ] [ alphaSsh ];
+          }
+          {
+            path = "nixos/hosts/beta/identity.yaml";
+            kind = "identity";
+            r = r [ alice ] [ ];
+          }
+          {
+            path = "nixos/hosts/beta/secrets.yaml";
+            kind = "host";
+            r = r [ alice betaAge ] [ ];
+          }
+          {
+            path = "nixos/hosts/gamma/identity.yaml";
+            kind = "identity";
+            r = r [ alice ] [ ];
+          }
+          {
+            path = "nixos/hosts/gamma/secrets.yaml";
+            kind = "host";
+            r = r [ alice ] [ ];
+          }
+          {
+            path = "nixos/services/mesh/secrets.yaml";
+            kind = "service";
+            r = r [ alice betaAge ] [ alphaSsh ];
+          }
+          {
+            path = "nixos/services/web/secrets.yaml";
+            kind = "service";
+            r = r [ alice ] [ alphaSsh ];
+          }
+          {
+            path = "users/alice/secrets.yaml";
+            kind = "user";
+            r = r [ alice ] [ ];
+          }
+        ];
     };
 
     # fleet.state: a subvolume per entry, mounted by a mount unit its units wait for

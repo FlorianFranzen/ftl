@@ -8,11 +8,13 @@ let
 
   fixture = ./fixtures/layout;
   hmStub = import ./stubs/home-manager.nix { inherit lib; };
+  sopsStub = import ./stubs/sops-nix.nix;
 
   # inputs as a consumer flake of the fixture would pass them
   inputs = {
     inherit nixpkgs;
     home-manager = hmStub;
+    sops-nix = sopsStub;
     self = {
       outPath = fixture;
       shortRev = "abc1234";
@@ -35,6 +37,7 @@ let
       nixpkgs
       fixture
       hmStub
+      sopsStub
       inputs
       check
       ;
@@ -53,7 +56,10 @@ in
   flake-isolated = import ./flake/isolated.nix args;
   flake-full = import ./flake/full.nix args;
 
-  # 4. VM tests
+  # 4. the fleet-sops check of the fixture: fleetl renders its committed .sops.yaml
+  cli = import ./cli.nix args;
+
+  # 5. VM tests
   modules = import ./modules.nix args;
   layers = import ./layers.nix { inherit pkgs ftl nixpkgs; };
   pipeline = import ./pipeline.nix { inherit pkgs ftl nixpkgs; };

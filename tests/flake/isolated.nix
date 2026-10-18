@@ -42,6 +42,7 @@ check "flake-isolated" (
     testNixosOnly = {
       expr = outputs "nixos";
       expected = [
+        "apps"
         "checks"
         "fleet"
         "ftlManifest"
@@ -51,6 +52,7 @@ check "flake-isolated" (
         "nixosModules"
         "nixosProfiles"
         "nixosServices"
+        "packages"
       ];
     };
     # a host needing nothing from the other folders still evaluates
