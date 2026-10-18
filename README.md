@@ -12,6 +12,7 @@ family, handled by its own `mk*` function that only looks at that folder;
 | `nixos/` | `hosts/<name>/*.nix` (modules of a host; `host.nix` is metadata `{ system; importance; layers; … }`, not a module; further attributes are free-form host data); `modules/**.nix` (imported into every host); `profiles/**.nix` (opt-in via the `profiles` argument); `layers/<name>.nix` (layers, see below); `services/<name>/*.nix` (services, see below; `service.nix` is metadata `{ hosts; roles; layers; … }`) | `mkNixos` | `nixosConfigurations`, `nixosModules`, `nixosProfiles`, `nixosLayers.<sys>.<name>`, `nixosServices.<name>`, `fleet.hosts`, `fleet.services`; checks `nixos-<host>`, `nixos-layer-<name>` |
 | `home/` | `modules/**.nix` (shared into every configuration); `profiles/<dir>/*.nix` (building blocks); `variants/*.nix` | `mkHome` | `homeModules`, `homeProfiles`, `homeConfigurations.<name>`, `legacyPackages.<sys>.homeConfigurations.<name>`; checks `home-<name>` |
 | `static/` | any files and folders (wallpapers, complete config dirs, …) | `mkStatic` | none; available as the module argument `static` |
+| `users/` | `<name>/user.nix` (metadata `{ admin; hosts; services; home; uid; groups; … }`, not a module); `ssh.pub` (SSH public keys, one per line); `sops.pgp`, `sops.age` (sops recipients, see below) | `mkUsers` | `fleet.users`; accounts on the hosts through `mkNixos` |
 
 Names: `ftl` is the library, its input and whatever lives on disk (`ftl-layers`,
 `ftl-layers.json`, `/var/lib/ftl`); `fleet` is every Nix namespace it owns: the
@@ -61,6 +62,18 @@ Missing folders are skipped. Folder names can be changed with
   `home/variants/*`, named `<base>-<variant>`. A base includes only the
   *direct* `.nix` files of each listed dir. Configurations are built for every
   `home.systems` entry (`homeConfigurations` uses the first one).
+- **Users.** `users/<name>/` is a person (or a deploy key): `user.nix` says
+  where they have an account: an `admin` is on every host, in `wheel`, and may
+  deploy; anyone else is on the `hosts` listed and on the hosts of the
+  `services` listed. `home` names one of the home configurations
+  (`<base>-<variant>`), installed through home-manager on those hosts. The
+  access module (`fleet.access`, on as soon as a host has users) creates the
+  accounts with the keys of `ssh.pub` and no password, turns off password and
+  root login in sshd, lets admins sudo against their forwarded SSH agent
+  (pam_rssh, with the same authorized keys), and puts every host's `ssh.pub`
+  (and `initrd.pub`) into `known_hosts`. Everything there is `mkDefault`.
+  A fleet with one person is `users/me/{user.nix,ssh.pub}` with
+  `{ admin = true; }`.
 - **Static files** are a lookup, not an installer. A file's key is its name
   without its last extension: `static/wallpapers/nixish-dark.png` becomes
   `static.wallpapers.nixish-dark`. Every directory also has an `outPath`, so

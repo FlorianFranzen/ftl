@@ -13,6 +13,7 @@ let
     "nixos"
     "home"
     "static"
+    "users"
   ];
   only =
     family:
@@ -76,9 +77,16 @@ check "flake-isolated" (
       expected = [ "homeConfigurations" ];
     };
 
-    # static/ produces no outputs of its own
+    # static/ and users/ produce no outputs of their own
     testStaticOnly = {
       expr = outputs "static";
+      expected = [
+        "fleet"
+        "ftlManifest"
+      ];
+    };
+    testUsersOnly = {
+      expr = outputs "users";
       expected = [
         "fleet"
         "ftlManifest"
@@ -104,6 +112,7 @@ check "flake-isolated" (
         ];
         home = [ "home" ];
         static = [ ];
+        users = [ ];
       };
     };
   }

@@ -171,6 +171,7 @@ check "flake-full" (
           "hosts"
           "manifest"
           "services"
+          "users"
         ];
         alpha = "alpha.example.org";
       };

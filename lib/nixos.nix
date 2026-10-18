@@ -3,7 +3,9 @@
 #   nixos/hosts/<name>/*.nix  modules of host <name>; host.nix is metadata
 #                             { system?; importance?; layers?; ... }, not a
 #                             module. Any further attributes are free-form host
-#                             data, visible to every host via `peers`.
+#                             data, visible to every host via `fleet.hosts`.
+#                             ssh.pub and initrd.pub next to it are the host's
+#                             SSH host keys (`keys.ssh`, `keys.initrd`).
 #   nixos/modules/**.nix      imported into every host (nixosModules)
 #   nixos/profiles/**.nix     opt-in modules, available as `profiles` argument
 #   nixos/layers/<name>.nix   layer definitions { kind; packages; units; }
@@ -25,6 +27,11 @@
 # argument's former name. `fleet.services.<name>` is every service's metadata
 # the same way.
 #
+# `fleet.users.<name>` is every user (see mkUsers) with the hosts it has an
+# account on resolved: an admin is on every host, anyone else on the hosts
+# listed and on the hosts of the services listed. The access module turns
+# that into accounts.
+#
 # A service's modules get the `service` argument: its metadata, `role` (the
 # roles this host has in it) and `dir` (its folder), so a module can say
 # `service.port` or `service.dir + "/secrets.yaml"` without knowing where it is.
@@ -40,6 +47,8 @@
   layers ? { },
   # services.<name> = { hosts?; roles?; layers?; modules?; ... } (merged over discovered)
   services ? { },
+  # users.<name> = { admin?; hosts?; services?; home?; uid?; groups?; keys?; ... } (see mkUsers)
+  users ? { },
   # system -> package set used to build layers
   pkgsFor ? system: import nixpkgs { inherit system; },
   specialArgs ? { },
@@ -73,8 +82,13 @@ let
         let
           hostDir = dir "hosts/${hostName}";
           meta = if builtins.pathExists (hostDir + "/host.nix") then import (hostDir + "/host.nix") else { };
+          key = file: lib.optionalAttrs (builtins.pathExists (hostDir + "/${file}")) {
+            ${lib.removeSuffix ".pub" file} = lib.trim (builtins.readFile (hostDir + "/${file}"));
+          };
+          keys = (meta.keys or { }) // key "ssh.pub" // key "initrd.pub";
         in
         meta
+        // lib.optionalAttrs (keys != { }) { inherit keys; }
         // {
           modules = loader.collectPaths (
             loader.loadTree {
@@ -231,6 +245,88 @@ let
     imports = serviceModules null serviceName service;
   }) services';
 
+  # --- users -----------------------------------------------------------------
+  reservedUserAttrs = [
+    "name"
+    "admin"
+    "hosts"
+    "services"
+    "home"
+    "uid"
+    "groups"
+    "keys"
+    "dir"
+  ];
+
+  normalizeUser =
+    userName: spec:
+    let
+      admin = spec.admin or false;
+      user = {
+        inherit admin;
+        services = spec.services or [ ];
+        # an admin is everywhere unless told otherwise; everyone is where their services are
+        hosts = lib.unique (
+          (if spec ? hosts then spec.hosts else lib.optionals admin (builtins.attrNames hostSpecs))
+          ++ lib.concatMap (s: services'.${s}.hosts) (spec.services or [ ])
+        );
+        home = spec.home or null;
+        uid = spec.uid or null;
+        groups = spec.groups or [ ];
+        keys = {
+          ssh = [ ];
+          pgp = [ ];
+          age = [ ];
+        }
+        // (spec.keys or { });
+        dir = spec.dir or null;
+        data = builtins.removeAttrs spec reservedUserAttrs;
+      };
+      unknownHosts = lib.filter (h: !(hostSpecs ? ${h})) (spec.hosts or [ ]);
+      unknownServices = lib.filter (s: !(serviceSpecs ? ${s})) user.services;
+    in
+    assert lib.assertMsg (!(spec ? name))
+      "ftl: user '${userName}' sets reserved attribute 'name' (the directory name is the user name)";
+    assert lib.assertMsg (unknownHosts == [ ])
+      "ftl: user '${userName}' names undefined hosts: ${toString unknownHosts}";
+    assert lib.assertMsg (unknownServices == [ ])
+      "ftl: user '${userName}' names undefined services: ${toString unknownServices}";
+    assert lib.assertMsg (user.home == null || homes ? ${user.home})
+      "ftl: user '${userName}' wants home configuration '${toString user.home}', which does not exist";
+    user;
+
+  users' = builtins.mapAttrs normalizeUser users;
+
+  usersOf = hostName: lib.filterAttrs (_: u: builtins.elem hostName u.hosts) users';
+
+  # Every user, as seen by every host (`fleet.users`).
+  userInfo = builtins.mapAttrs (
+    userName: user:
+    user.data
+    // {
+      name = userName;
+      inherit (user)
+        admin
+        hosts
+        services
+        home
+        uid
+        groups
+        keys
+        ;
+    }
+  ) users';
+
+  # The home configurations of a host's users.
+  homeModule =
+    hostName:
+    let
+      withHome = lib.filterAttrs (_: u: u.home != null) (usersOf hostName);
+    in
+    lib.optional (withHome != { }) {
+      home-manager.users = lib.mapAttrs (_: u: homes.${u.home}) withHome;
+    };
+
   # --- layers ----------------------------------------------------------------
   discoveredLayers = builtins.mapAttrs (_: import) (loader.loadTreeIfExists { dir = dir "layers"; });
   layers' = discoveredLayers // layers;
@@ -249,6 +345,7 @@ let
     "modules"
     "layers"
     "services"
+    "users"
   ];
 
   normalizeHost =
@@ -264,6 +361,7 @@ let
           (spec.layers or [ ]) ++ lib.concatMap (s: s.layers) (builtins.attrValues ownServices)
         );
         services = builtins.attrNames ownServices;
+        users = builtins.attrNames (usersOf hostName);
         data = builtins.removeAttrs spec reservedHostAttrs;
       };
       unknownLayers = lib.filter (l: !(layers' ? ${l})) (spec.layers or [ ]);
@@ -291,6 +389,7 @@ let
         importance
         layers
         services
+        users
         ;
     }
   ) hosts';
@@ -347,6 +446,7 @@ let
             system
             layers
             services
+            users
             ;
         };
         fleet.layers.installed = lib.genAttrs host.layers (l: {
@@ -364,12 +464,14 @@ let
     ../modules/layers.nix
     ../modules/comin.nix
     ../modules/state.nix
+    ../modules/access.nix
   ];
 
   # The fleet as every host sees it; `self` is added per host below.
   fleet = {
     hosts = peers;
     services = serviceInfo;
+    users = userInfo;
   };
 
   specialArgs' = specialArgs // {
@@ -390,6 +492,7 @@ let
       ++ loader.collectPaths nixosModules
       ++ lib.concatLists (lib.mapAttrsToList (serviceModules hostName) (servicesOf hostName))
       ++ host.modules
+      ++ homeModule hostName
       ++ [ (metaModule hostName host) ];
     specialArgs = specialArgs' // {
       fleet = fleet // {
@@ -451,6 +554,7 @@ in
 # Validate every host and service spec eagerly (cheap; no NixOS evaluation involved).
 assert builtins.all builtins.isAttrs (builtins.attrValues hosts');
 assert builtins.all builtins.isAttrs (builtins.attrValues services');
+assert builtins.all builtins.isAttrs (builtins.attrValues users');
 {
   inherit
     nixosConfigurations
@@ -465,4 +569,5 @@ assert builtins.all builtins.isAttrs (builtins.attrValues services');
     ;
   hosts = hosts';
   services = serviceInfo;
+  users = userInfo;
 }

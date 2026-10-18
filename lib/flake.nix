@@ -7,6 +7,7 @@
 #                        nixosServices, fleet.hosts, fleet.services
 #   home/    mkHome      homeModules, homeProfiles, homeConfigurations
 #   static/  mkStatic    the `static` module argument (no outputs)
+#   users/   mkUsers     fleet.users, accounts on the hosts (through mkNixos)
 #
 # plus checks for all of them and `fleet.manifest`, consumed by the ftl
 # pipeline. Everything the library itself exports is below `fleet`; the former
@@ -34,6 +35,8 @@ args@{
   # mkHome options: bases, variants, systems, sharedModules, extraSpecialArgs,
   # username
   home ? { },
+  # user specs merged over users/ (see mkUsers)
+  users ? { },
   ...
 }:
 let
@@ -52,6 +55,7 @@ let
     "config"
     "nixos"
     "home"
+    "users"
   ];
   passthru = builtins.removeAttrs args knownArgs;
 
@@ -60,6 +64,7 @@ let
     nixos = "nixos";
     home = "home";
     static = "static";
+    users = "users";
   }
   // layout;
   folder =
@@ -108,6 +113,11 @@ let
         }
       );
 
+  # --- users/ ----------------------------------------------------------------
+  users' =
+    (if folder "users" != null then (import ./users.nix { src = folder "users"; inherit lib; }).users else { })
+    // users;
+
   # --- nixos/ ----------------------------------------------------------------
   integration = import ../modules/flake.nix {
     inherit inputs;
@@ -138,6 +148,7 @@ let
         hosts = nixos.hosts or { };
         layers = nixos.layers or { };
         services = nixos.services or { };
+        users = users';
         specialArgs = nixos.specialArgs or { };
         extraProfiles = nixos.extraProfiles or { };
         homes = if homeOut != null then homeOut.modules else { };
@@ -204,6 +215,7 @@ let
       # in every host)
       fleet.hosts = nixosOut.peers;
       fleet.services = nixosOut.services;
+      fleet.users = nixosOut.users;
       ftlPeers = lib.warn "ftl: the `ftlPeers` output is `fleet.hosts` now" nixosOut.peers;
     })
     (lib.optionalAttrs (checks != { }) { inherit checks; })

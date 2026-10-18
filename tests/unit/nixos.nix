@@ -37,6 +37,11 @@ let
       };
     };
     homes.desktop-dark = { };
+    users =
+      (ftl.lib.mkUsers {
+        src = fixture + "/users";
+        inherit lib;
+      }).users;
   };
 
   cfg = host: n.nixosConfigurations.${host}.config;
@@ -102,6 +107,14 @@ check "unit-nixos" (
             "mesh"
             "web"
           ];
+          users = [
+            "alice"
+            "bob"
+          ];
+          keys = {
+            ssh = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAlphaHost0000000000000000000000000000000000000";
+            initrd = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAlphaInitrd00000000000000000000000000000000000";
+          };
           fqdn = "alpha.example.org";
           roles = [ "web" ];
         };
@@ -111,6 +124,7 @@ check "unit-nixos" (
           importance = "optional";
           layers = [ "tools" ];
           services = [ "mesh" ];
+          users = [ "alice" ];
         };
         gamma = {
           name = "gamma";
@@ -118,6 +132,7 @@ check "unit-nixos" (
           importance = "required";
           layers = [ "tools" ];
           services = [ "mesh" ];
+          users = [ "alice" ];
         };
       };
     };
@@ -175,6 +190,87 @@ check "unit-nixos" (
     testServiceLayers = {
       expr = (cfg "gamma").fleet.layers.installed;
       expected.tools.kind = "packages";
+    };
+
+    # users: an admin is on every host, bob where his service is
+    testUsers = {
+      expr = lib.mapAttrs (_: u: {
+        inherit (u) admin hosts;
+      }) n.users;
+      expected = {
+        alice = {
+          admin = true;
+          hosts = [
+            "alpha"
+            "beta"
+            "gamma"
+          ];
+        };
+        bob = {
+          admin = false;
+          hosts = [ "alpha" ];
+        };
+      };
+    };
+
+    # fleet.access: accounts from the users, keys only, sudo via the agent,
+    # every host key known
+    testAccess = {
+      expr =
+        let
+          a = cfg "alpha";
+          b = cfg "beta";
+        in
+        {
+          accounts = builtins.attrNames (lib.filterAttrs (_: u: u.isNormalUser) a.users.users);
+          betaAccounts = builtins.attrNames (lib.filterAttrs (_: u: u.isNormalUser) b.users.users);
+          alice = {
+            inherit (a.users.users.alice) uid extraGroups;
+            keys = a.users.users.alice.openssh.authorizedKeys.keys;
+          };
+          bobGroups = a.users.users.bob.extraGroups;
+          mutable = a.users.mutableUsers;
+          sshd = {
+            inherit (a.services.openssh.settings) PasswordAuthentication PermitRootLogin;
+          };
+          sudo = a.security.pam.rssh.enable && a.security.pam.services.sudo.rssh;
+          known = lib.mapAttrs (_: k: k.hostNames) (
+            lib.filterAttrs (n: _: lib.hasPrefix "alpha" n) b.programs.ssh.knownHosts
+          );
+          home = b.home-manager.users ? alice;
+        };
+      expected = {
+        accounts = [
+          "alice"
+          "bob"
+        ];
+        betaAccounts = [ "alice" ];
+        alice = {
+          uid = 1000;
+          extraGroups = [ "wheel" ];
+          keys = [
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAlice000000000000000000000000000000000000000 alice@laptop"
+          ];
+        };
+        bobGroups = [ "video" ];
+        mutable = false;
+        sshd = {
+          PasswordAuthentication = false;
+          PermitRootLogin = "no";
+        };
+        sudo = true;
+        known = {
+          alpha = [
+            "alpha"
+            "alpha.example.org"
+          ];
+          alpha-initrd = [
+            "[alpha]:2222"
+            "[alpha.example.org]:2222"
+          ];
+        };
+        home = true;
+      };
     };
 
     # fleet.state: a subvolume per entry, mounted by a mount unit its units wait for

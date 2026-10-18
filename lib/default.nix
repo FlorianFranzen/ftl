@@ -8,6 +8,7 @@ in
   mkNixos = import ./nixos.nix;
   mkHome = import ./home.nix;
   mkStatic = import ./static.nix;
+  mkUsers = import ./users.nix;
   mkLayer = import ./layer.nix;
   mkManifest = import ./manifest.nix;
 }

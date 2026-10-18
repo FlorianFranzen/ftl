@@ -19,6 +19,7 @@
         layers = ./modules/layers.nix;
         comin = ./modules/comin.nix;
         state = ./modules/state.nix;
+        access = ./modules/access.nix;
         # ftl.* -> fleet.* option aliases
         compat = ./modules/compat.nix;
         default = {
@@ -29,6 +30,7 @@
             self.nixosModules.layers
             self.nixosModules.comin
             self.nixosModules.state
+            self.nixosModules.access
             self.nixosModules.compat
           ];
         };
