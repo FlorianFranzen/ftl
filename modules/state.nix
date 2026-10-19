@@ -83,6 +83,10 @@ let
     in
     if dynamic == true || user == null || !(config.users.users ? ${user}) || fixed then null else user;
 
+  invalidNames = lib.filter (n: builtins.match "[A-Za-z0-9][A-Za-z0-9_-]*" n == null) (
+    builtins.attrNames entries
+  );
+
   floating = lib.concatLists (
     lib.mapAttrsToList (
       name: entry:
@@ -142,6 +146,10 @@ let
         service
         backup
         ;
+      # what fleet-state sets on a dataset it makes for the entry
+      zfsProperties = lib.optionalAttrs zfs (
+        { "com.sun:auto-snapshot" = lib.boolToString e.snapshots; } // e.zfs.properties
+      );
     }) entries;
   };
 
@@ -319,6 +327,12 @@ in
         {
           assertion = zfs || device != null;
           message = "fleet.state needs a btrfs filesystem (fleet.storage.btrfsDevice) or a ZFS pool (fleet.storage.zfsPool)";
+        }
+        {
+          # entry names become dataset, subvolume and snapshot names, and are
+          # passed around by fleet-state and fleetl
+          assertion = invalidNames == [ ];
+          message = "fleet.state: entry names are letters, digits, - and _: ${toString invalidNames}";
         }
         {
           assertion = floating == [ ];

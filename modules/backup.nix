@@ -26,6 +26,9 @@
 # besides the password (an SSH key, a token file): a restore on another host,
 # when a service moves (`fleetl service move --via backup`), gets them for
 # the time of the restore.
+#
+# A backup covers the entry's own dataset or subvolume: a nested subvolume or
+# child dataset below it is not part of the snapshot, and so not backed up.
 {
   config,
   lib,
@@ -49,7 +52,9 @@ let
     repository = cfg.repositories.${kind} // {
       password-file = cfg.passwordFile;
     };
-    forget = lib.mapAttrs' (k: v: lib.nameValuePair "keep-${k}" v) cfg.retention.${kind};
+    forget = lib.mapAttrs' (k: v: lib.nameValuePair "keep-${k}" v) (
+      lib.filterAttrs (_: v: v != null) cfg.retention.${kind}
+    );
   });
 in
 {
@@ -100,24 +105,45 @@ in
       description = "When backups run (systemd calendar event).";
     };
 
-    retention = lib.mkOption {
-      type = lib.types.attrsOf (lib.types.attrsOf lib.types.int);
-      default = {
-        # -1 keeps every yearly snapshot
-        state = {
+    retention =
+      let
+        periods = {
+          hourly = null;
+          daily = null;
+          weekly = null;
+          monthly = null;
+          yearly = null;
+        };
+        kind =
+          defaults:
+          lib.mkOption {
+            default = { };
+            description = "Snapshots of this kind kept, as rustic's forget --keep-<period> (-1: all).";
+            type = lib.types.submodule {
+              options = lib.mapAttrs (
+                period: _:
+                lib.mkOption {
+                  type = lib.types.nullOr lib.types.int;
+                  default = defaults.${period} or null;
+                  description = "Snapshots kept by ${period}.";
+                }
+              ) periods;
+            };
+          };
+      in
+      {
+        state = kind {
           daily = 14;
           weekly = 8;
           monthly = 12;
           yearly = -1;
         };
-        data = {
+        data = kind {
           daily = 7;
           weekly = 4;
           monthly = 6;
         };
       };
-      description = "Snapshots kept per kind, as rustic's forget --keep-<period>.";
-    };
 
     metrics.textfileDir = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
@@ -133,7 +159,7 @@ in
     profiles = lib.mkOption {
       type = lib.types.attrsOf toml.type;
       readOnly = true;
-      default = profiles;
+      default = if cfg.enable then profiles else { };
       defaultText = lib.literalMD "the rustic profile of each kind";
       description = "The rustic profiles, /etc/rustic/<kind>.toml (for `fleetl`).";
     };
@@ -152,7 +178,9 @@ in
         message = "fleet.backup needs fleet-state (fleet.storage.tool.enable)";
       }
       {
-        assertion = lib.all (kind: (cfg.retention.${kind} or { }) != { }) kinds;
+        assertion = lib.all (
+          kind: lib.any (v: v != null) (builtins.attrValues cfg.retention.${kind})
+        ) kinds;
         message = "fleet.backup: every kind backed up needs a retention (fleet.backup.retention)";
       }
     ];
@@ -181,8 +209,11 @@ in
         "network-online.target"
         "fleet-state.service"
       ];
-      wants = [ "network-online.target" ];
-      requires = [ "fleet-state.service" ];
+      # wants: a switch that restarts fleet-state must not kill a running backup
+      wants = [
+        "network-online.target"
+        "fleet-state.service"
+      ];
       serviceConfig = {
         Type = "oneshot";
         ExecStart = "${fleetState} backup --all";

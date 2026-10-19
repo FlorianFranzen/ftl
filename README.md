@@ -150,8 +150,11 @@ each library function and module reads, provides and does.
                                   not ignored, pinned to its ssh.pub
   fleetl host show | service show | user show <name>
   fleetl state list | snapshots <host> [<entry>]
+  fleetl state size | stop | start <host> <entry>...
   fleetl state backup <host> --all|<entry>...
-  fleetl state restore <host> <entry> [--snapshot <id>] [--no-start]
+  fleetl state restore <host> <entry> [--snapshot <id>] [--from-host <h>] [--no-start]
+  fleetl state rollback <host> <entry> [<aside>]
+  fleetl state discard <host> <aside>
                                   fleet-state on the host, as root (sudo through
                                   the forwarded agent unless the login is root)
   fleetl fleet generate [--force] [<generator>...]
@@ -258,16 +261,20 @@ Three things live under `nixos/` besides hosts, and they are easy to mix up:
   `metrics.textfileDir` writes `fleet_backup_last_success_timestamp_seconds`
   and `fleet_backup_snapshots{kind}` for node_exporter.
 
-  A restore puts an entry back in place: `fleetl state restore <host>
-  <entry> [--snapshot <id>]` (on the host: `fleet-state restore`) checks that
-  the entry's own dataset or subvolume is mounted at its path, stops its
-  units (a template unit's instances and sockets included), keeps what is
-  there as a rollback snapshot (`<dataset>@fleet-pre-restore-<time>`, or
-  `@fleet-snapshots/<entry>@pre-restore-<time>` on btrfs), restores the
-  latest backup (or the one named) with the uids and gids as they were,
-  removing what the backup does not have, and starts again what was
-  running. A failed restore leaves the units stopped and says how to roll
-  back.
+  A restore puts an entry back: `fleetl state restore <host> <entry>
+  [--snapshot <id>]` (on the host: `fleet-state restore`) restores the
+  latest backup (or the one named), with the uids and gids as they were,
+  into a new dataset or subvolume next to the entry while it keeps running,
+  then swaps it in: the entry's units and their triggers are blocked from
+  starting and stopped, along with whatever needs them, the entry is
+  unmounted, the current dataset or subvolume is renamed aside
+  (`<location>.aside-<time>`) and the restored one takes its name; then
+  everything that stopped is started again. An entry mounted inside
+  another stays as it is. `fleetl state rollback` swaps a copy kept aside
+  back in (the current one goes aside in turn), `fleetl state discard`
+  destroys one, `fleetl state list` shows them. `stop` and `start` do the
+  unit part alone; a stopped entry's units refuse to start until `start`
+  (a drop-in in `/run`, so a reboot lifts it).
 
   ```nix
   fleet.backup = {
@@ -396,8 +403,11 @@ see whether the library still works with the channel's current head:
     init only by hand, labels, tags and hosts of the snapshots, owners kept,
     the entry backed up rather than what is mounted at its path, no
     snapshot or scratch directory left, a vanished repository failing;
-    restores of the latest and of an older backup with a rollback snapshot
-    and the units stopped and started again, a template unit's socket;
+    restores of the latest and of an older backup swapped in with the
+    current content kept aside, rollback and discard, an entry mounted
+    inside another left alone, what needs the units, timers and a template
+    unit's socket stopped and started again, units blocked while stopped,
+    leftover snapshots replaced, a failing entry not failing the others;
   - `services`: `fleet.secrets` with sops-nix for real: a host decrypts its own
     store and a service's with its SSH host key, no age key installed;
   - `layers`: layer install, update, pins and rollback, plus the comin hook;

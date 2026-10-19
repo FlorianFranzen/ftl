@@ -273,25 +273,36 @@ arguments; stores need `root`.
   is not ignored) at the deploy output's address and login (else the host's
   `fqdn` or name, and root), pinned to its `ssh.pub` the way `mkDeploy` pins
   deploys; `state` runs `fleet-state` on a host as root, its arguments
-  quoted for the remote shell, through `sudo` with the agent forwarded
-  (pam_rssh) unless the login is root. Temporary directories are `0700` and
+  quoted for the remote shell (bash's `printf %q`), through `sudo` with the
+  agent forwarded (pam_rssh) unless the login is root; root on that host
+  can use the agent while it is forwarded. Temporary directories are `0700` and
   removed on any exit.
 - `fleet-state.sh` (hosts, as root; packaged by `modules/state.nix` with the
-  host's ZFS or btrfs tools): reads `/etc/fleet-state/state.json` and, with
-  backups on, `backup.json` and `/etc/rustic/<kind>.toml`. Every operation
-  on an entry's content works on a read-only snapshot of its dataset or
-  subvolume (ZFS: `<dataset>@<tag>`, mounted below a scratch directory;
-  btrfs: `@fleet-snapshots/<entry>@<tag>` on the top level), never on what
-  happens to be mounted at its path. `backup` labels each rustic snapshot
-  with the entry, records the host, tags `fleet-entry:` and
-  `fleet-service:`; `--all` prunes and writes the metrics. `restore`
-  checks with `findmnt` that the entry's own dataset or subvolume is at its
-  path, stops its units (template instances and an `Accept=yes` socket
-  included, triggers first), keeps a rollback snapshot that is not cleaned
-  up, runs `rustic restore --delete --numeric-id` into the path and starts
-  what was running. `stop` and `start` do the unit part alone. Snapshots,
-  mounts and scratch space are undone on any exit, signals included; one
-  mutating run at a time (`/run/fleet-state.lock`).
+  host's ZFS or btrfs tools): reads `/etc/fleet-state/state.json` (backend,
+  device or pool, host, entries with their ZFS properties) and, with backups
+  on, `backup.json` and `/etc/rustic/<kind>.toml`.
+  - Content is always read from a read-only snapshot of the entry's dataset
+    or subvolume (ZFS: `<dataset>@<tag>`, mounted below a scratch directory;
+    btrfs: `@fleet-snapshots/<entry>@<tag>` on the top level), never from
+    what happens to be mounted at its path; a snapshot a dead run left is
+    replaced.
+  - Content is only ever written into a new dataset or subvolume
+    (`<location>.incoming`), which is then swapped in: the entry is
+    quiesced (its units and triggers blocked by a drop-in in `/run` that
+    asserts the absence of `/run/fleet-state/<entry>.blocked`, triggers
+    stopped, then the running units and instances, then the mount unit,
+    which takes nested entries along), the current location renamed to
+    `<location>.aside-<time>` (unique), the new one renamed into place, its
+    ZFS properties set, and whatever stopped meanwhile (units with a unit
+    file, but not a socket's spawned instances) started again.
+    `restore`, `rollback` and the moves' `receive` all work this way.
+  - `backup` labels each rustic snapshot with the entry, records the host,
+    tags `fleet-entry:` and `fleet-service:`; `--all` prunes even when an
+    entry failed and writes the metrics (the last success kept when not).
+    Steps that may fail alone run in a subshell outside any condition, so
+    errexit holds in them.
+  - Snapshots, mounts and scratch space are undone on any exit, signals
+    included; one changing run at a time (`/run/fleet-state.lock`).
 - `ftl-layers.sh` (hosts): environment from `modules/layers.nix`
   (`FTL_REPO_URL`, `FTL_LAYERS`, `FTL_STATE_DIR`, `FTL_PROFILE_DIR`,
   `FTL_VERIFY_MODE`, ...); installs each layer's `nixosLayers.<sys>.<l>` at

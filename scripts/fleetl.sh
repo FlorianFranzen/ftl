@@ -17,15 +17,18 @@
 #                                       is not ignored), pinned to its ssh.pub
 #   fleetl host show <name>             a host: services, users, layers, keys, stores
 #   fleetl service show <name>          a service: hosts, roles, layers, data, store
-#   fleetl state list <host>            the host's state entries
+#   fleetl state list <host>            the host's state entries, and copies kept aside
+#   fleetl state size|stop|start <host> <entry>...
 #   fleetl state snapshots <host> [<entry>]
 #                                       their backups
 #   fleetl state backup <host> --all|<entry>...
 #                                       back them up now
-#   fleetl state restore <host> <entry> [--snapshot <id>] [--no-start]
-#                                       put an entry back as a backup has it (its units
-#                                       stopped meanwhile, the current content kept as a
-#                                       rollback snapshot)
+#   fleetl state restore <host> <entry> [--snapshot <id>] [--from-host <h>] [--no-start]
+#                                       put an entry back as a backup has it (restored
+#                                       beside it, then swapped in; the current content
+#                                       kept aside)
+#   fleetl state rollback <host> <entry> [<aside>]
+#   fleetl state discard <host> <aside> swap a copy kept aside back in; destroy one
 #   fleetl fleet generate [--force] [<generator>...]
 #                                       run the fleet's generators whose files are missing
 #   fleetl fleet show                   the fleet: hosts, services, users, keys, stores
@@ -539,11 +542,6 @@ host_install() {
   nixos-anywhere "${args[@]}" "$@"
 }
 
-# A command on one host, or on every host that is not ignored, one after the
-# other.  The address and the login are those of the deploy output when the
-# repository has one (mkDeploy: `address`, `sshUser`), else the host's fqdn or
-# name and root; the connection is pinned to the host's ssh.pub like a deploy.
-# FLEETL_SSH replaces the ssh program (tests).
 # ssh_to <host> [<user>]: the ssh command line for a host, in ${ssh_cmd[@]}.
 # The address and the login are those of the deploy output when the
 # repository has one (mkDeploy: `address`, `sshUser`), else the host's fqdn or
@@ -570,9 +568,12 @@ ssh_to() {
   ssh_cmd+=("$user@$address")
 }
 
-# as_root <host> <command...>: the command as root on the host, quoted for
-# the remote shell; through sudo (with the agent forwarded, for pam_rssh)
-# unless the login is root.
+# as_root <host> <command...>: the command as root on the host, quoted (by
+# bash's printf %q, for a bash or POSIX login shell) for the remote shell;
+# through sudo unless the login is root.  sudo asks the agent (pam_rssh), so
+# the agent is forwarded for the time of the command: root on that host can
+# use it meanwhile, as with any forwarded agent (ssh-add -c makes each use
+# ask).
 as_root() {
   local h="$1"
   shift
@@ -582,9 +583,17 @@ as_root() {
     cmd=(sudo "${cmd[@]}")
     ssh_cmd=("${ssh_cmd[0]}" -A "${ssh_cmd[@]:1}")
   fi
-  "${ssh_cmd[@]}" -- "$(printf '%q ' "${cmd[@]}")"
+  "${ssh_cmd[@]}" -- "$(printf '%q ' "${cmd[@]}")" || {
+    local rc=$?
+    if [ "$ssh_user" != root ] && [ "$rc" = 1 ]; then
+      echo "fleetl: if sudo refused on $h: it authenticates with your agent (pam_rssh); is it forwarded and holding your key (ssh-add -L)?" >&2
+    fi
+    return "$rc"
+  }
 }
 
+# A command on one host, or on every host that is not ignored, one after the
+# other (see ssh_to for how a host is reached).
 host_exec() {
   in_repo
   local name="${1:?usage: fleetl host exec <name>|all [--user <u>] [--] <command...>}"
@@ -601,6 +610,7 @@ host_exec() {
   [ $# -gt 0 ] || die "host exec: no command given"
 
   hosts_json="$(fleet_json hosts)"
+  [ -n "$user" ] || user="$(nix eval --raw .#deploy.sshUser 2>/dev/null || echo root)"
   local -a names
   if [ "$name" = all ]; then
     mapfile -t names < <(jq -r 'to_entries[] | select(.value.importance != "ignored") | .key' <<<"$hosts_json")
@@ -626,14 +636,15 @@ host_exec() {
 
 # --- state ---------------------------------------------------------------------
 
-# The entries of a host, as fleet-state on it knows them: list, backup,
-# snapshots, restore (see fleet-state on the host for the details).
+# fleet-state on a host, as root (see `fleet-state help` there for the
+# details).
 state_cmd() {
   in_repo
   local sub="$1" h="${2:?usage: fleetl state $1 <host> ...}"
   shift 2
   case "$sub" in
-    restore) [ $# -gt 0 ] || die "usage: fleetl state restore <host> <entry> [--snapshot <id>] [--no-start]" ;;
+    restore | rollback) [ $# -gt 0 ] || die "usage: fleetl state $sub <host> <entry> ..." ;;
+    discard) [ $# = 1 ] || die "usage: fleetl state discard <host> <aside>" ;;
   esac
   as_root "$h" fleet-state "$sub" "$@"
 }
@@ -719,7 +730,7 @@ case "${1:-}" in
     ;;
   state)
     case "${2:-}" in
-      list | snapshots | backup | restore) state_cmd "${@:2}" ;;
+      list | size | stop | start | snapshots | backup | restore | rollback | discard) state_cmd "${@:2}" ;;
       *) usage ;;
     esac
     ;;
