@@ -117,7 +117,15 @@ let
 
   # --- users/ ----------------------------------------------------------------
   users' =
-    (if folder "users" != null then (import ./users.nix { src = folder "users"; inherit lib; }).users else { })
+    (
+      if folder "users" != null then
+        (import ./users.nix {
+          src = folder "users";
+          inherit lib;
+        }).users
+      else
+        { }
+    )
     // users;
 
   # --- nixos/ ----------------------------------------------------------------
@@ -125,10 +133,11 @@ let
     inherit inputs;
     inherit (packages) overlays;
     nixpkgsConfig = packages.config;
-    exportInputs = nixos.exportInputs or [
-      "self"
-      "nixpkgs"
-    ];
+    exportInputs =
+      nixos.exportInputs or [
+        "self"
+        "nixpkgs"
+      ];
     homeManager = if homeOut != null then homeManager else null;
     homeSharedModules = if homeOut != null then homeOut.allSharedModules else [ ];
     homeExtraSpecialArgs = if homeOut != null then homeOut.extraSpecialArgs else { };
@@ -169,8 +178,7 @@ let
 
   # Decided statically, so that accessing other outputs never evaluates nixpkgs.
   hasHomeConfigs = homeOut != null && homeManager != null;
-  legacySystems =
-    lib.optionals hasPkgs systems ++ lib.optionals hasHomeConfigs homeSystems;
+  legacySystems = lib.optionals hasPkgs systems ++ lib.optionals hasHomeConfigs homeSystems;
 
   legacyPackages = lib.genAttrs (lib.unique legacySystems) (
     system:
@@ -217,7 +225,9 @@ let
       '';
 
   fleetChecks = lib.optionalAttrs (hasFleet && sopsOut.stores != [ ]) (
-    lib.genAttrs systems (system: { fleet-sops = sopsCheck system; })
+    lib.genAttrs systems (system: {
+      fleet-sops = sopsCheck system;
+    })
   );
 
   checks = lib.foldl' lib.recursiveUpdate { } [
@@ -260,6 +270,8 @@ let
       fleet.hosts = nixosOut.fleet.hosts;
       fleet.services = nixosOut.services;
       fleet.users = nixosOut.users;
+      # the fleet's own public files (nixos/<name>.pub)
+      fleet.keys = nixosOut.keys;
       # every secret store and its recipients, for `fleetl secrets sync`
       fleet.sops = sopsOut;
       # the generators as programs (fleetl host generate), and what they make
@@ -270,7 +282,9 @@ let
         {
           fleetl = fleetlFor system;
         }
-        // lib.mapAttrs' (name: p: lib.nameValuePair "generate-${name}" p) (nixosOut.generatorPrograms system)
+        // lib.mapAttrs' (name: p: lib.nameValuePair "generate-${name}" p) (
+          nixosOut.generatorPrograms system
+        )
       );
       apps = lib.genAttrs systems (system: {
         fleetl = {

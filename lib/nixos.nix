@@ -35,7 +35,8 @@
 # imports) without infinite recursion, e.g. to derive mesh endpoints, scrape
 # targets or DNS records from the host list. `fleet.services.<name>` is every
 # service's metadata the same way, `fleet.users.<name>` every user with the
-# hosts it has an account on resolved.
+# hosts it has an account on resolved, `fleet.keys.<name>` the fleet's own
+# public files (nixos/<name>.pub, made by fleet-scoped generators).
 #
 # The parts live in nixos/: hosts, services, users, sops (the stores and their
 # recipients), generators and layers. Each is a function of the shared context
@@ -96,6 +97,7 @@ let
         lib
         loader
         kinds
+        src
         root'
         dir
         exists
@@ -130,6 +132,7 @@ let
     sops
     generators
     generatorPrograms
+    fleetKeys
     layerKind
     layerSystems
     nixosLayers
@@ -163,9 +166,16 @@ let
           kind = layerKind l;
         });
         fleet.layers.repo = lib.mkIf (repo != null) (lib.mkDefault repo);
-        fleet.secrets = lib.mkIf (host.dir != null) {
-          file = lib.mkIf (builtins.pathExists (host.dir + "/secrets.yaml")) (host.dir + "/secrets.yaml");
-          ageKeyFile = lib.mkIf (peers.${hostName} ? keys.age) "/var/lib/sops-nix/key.txt";
+        fleet.secrets = {
+          file = lib.mkIf (host.dir != null && builtins.pathExists (host.dir + "/secrets.yaml")) (
+            host.dir + "/secrets.yaml"
+          );
+          ageKeyFile = lib.mkIf (
+            host.dir != null && peers.${hostName} ? keys.age
+          ) "/var/lib/sops-nix/key.txt";
+          shared = lib.mkIf (src != null && builtins.pathExists (src + "/secrets.yaml")) (
+            src + "/secrets.yaml"
+          );
         };
         networking.hostName = lib.mkDefault hostName;
         nixpkgs.hostPlatform = lib.mkDefault host.system;
@@ -179,6 +189,7 @@ let
     hosts = peers;
     services = serviceInfo;
     users = userInfo;
+    keys = fleetKeys;
   };
 
   specialArgs' = specialArgs // {
@@ -273,4 +284,5 @@ assert builtins.all builtins.isAttrs (builtins.attrValues users');
   hosts = hosts';
   services = serviceInfo;
   users = userInfo;
+  keys = fleetKeys;
 }
