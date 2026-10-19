@@ -88,7 +88,16 @@ module arguments use `fleet`.
 ### `lib/nixos.nix` — `mkNixos`
 
 The hub. It reads the `nixos/` folder and the specs the other families hand
-it, and produces every host-related output.
+it, and produces every host-related output. The work is split by entity into
+`lib/nixos/`: `hosts.nix` (discovery, validation, `fleet.hosts`),
+`services.nix` (discovery, roles, the `service` argument, `nixosServices`),
+`users.nix` (placement, homes and their companions, `fleet.users`),
+`sops.nix` (stores and recipients), `generators.nix` and `layers.nix`. Each
+part is a function of one shared context: the arguments below plus every
+other part's results (`lib.fix`), so the parts are read in any order while
+the data flows acyclically (services need the host specs, users the
+services, hosts their services and users, the stores all three).
+`nixos.nix` itself only assembles the configurations, checks and manifest.
 
 - Reads: `nixos/hosts/<h>/` (`host.nix` metadata; `*.nix` modules; `*.pub`
   and `sops.age` key files; `secrets.yaml`, `identity.yaml`),
