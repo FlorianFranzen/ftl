@@ -21,21 +21,7 @@
         state = ./modules/state.nix;
         access = ./modules/access.nix;
         secrets = ./modules/secrets.nix;
-        # ftl.* -> fleet.* option aliases
-        compat = ./modules/compat.nix;
-        default = {
-          imports = [
-            self.nixosModules.builder
-            self.nixosModules.cache
-            self.nixosModules.client
-            self.nixosModules.layers
-            self.nixosModules.comin
-            self.nixosModules.state
-            self.nixosModules.access
-            self.nixosModules.secrets
-            self.nixosModules.compat
-          ];
-        };
+        default.imports = import ./modules/all.nix;
       };
 
       templates.minimal = {

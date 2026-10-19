@@ -17,7 +17,7 @@ let
   scripts = import ./scripts.nix { inherit pkgs; };
   kinds = import ../lib/kinds.nix lib;
   installed = lib.mapAttrs (
-    n: l: l // { kind = kinds.normalize "layer '${n}'" l.kind; }
+    n: l: l // { kind = kinds.check "layer '${n}'" l.kind; }
   ) cfg.installed;
 
   profileDir = "/nix/var/nix/profiles/layers";
@@ -80,7 +80,6 @@ in
       type = lib.types.attrsOf (
         lib.types.submodule {
           options.kind = lib.mkOption {
-            # "apps" and "services" are the old names of "packages" and "units"
             type = lib.types.enum kinds.all;
             default = "packages";
           };

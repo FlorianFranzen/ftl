@@ -16,13 +16,14 @@ delegates to them. Each `mk*` function can also be used on its own.
 
 Names: `ftl` is the library, its input and whatever lives on disk (`ftl-layers`,
 `ftl-layers.json`, `/var/lib/ftl`); `fleet` is every Nix namespace it owns: the
-`fleet.*` NixOS options, the `fleet` output and the `fleet` module argument. The
-former `ftl.*` options and the `ftlPeers`/`ftlManifest` outputs still work, with a
-warning, until the next release.
+`fleet.*` NixOS options, the `fleet` output and the `fleet` module argument.
 
 Missing folders are skipped. Folder names can be changed with
 `layout.<family> = "dir"`, or a family disabled with `null`. Unrecognized
 `mkFlake` arguments are deep-merged into the outputs.
+
+[docs/architecture.md](docs/architecture.md) is the map of the code: what
+each library function and module reads, provides and does.
 
 ## Conventions in detail
 
@@ -46,7 +47,6 @@ Missing folders are skipped. Folder names can be changed with
   anywhere, including `imports`, to derive peers, scrape targets or DNS
   records from the host list. The same data is the `fleet.hosts` output, for
   anything outside a NixOS configuration (DNS, scripts, install tooling).
-  (`peers`, the argument's former name, is still passed as `fleet.hosts`.)
 
   ```nix
   # nixos/hosts/web/host.nix
@@ -69,18 +69,21 @@ Missing folders are skipped. Folder names can be changed with
   host imports it. So adding a desktop home to a user adds exactly the system
   integration it needs, and a host with only terminal homes gets none of it.
 - **Users.** `users/<name>/` is a person (or a deploy key): `user.nix` says
-  where they have an account: an `admin` is on every host, in `wheel`, and may
-  deploy; anyone else is on the `hosts` listed and on the hosts of the
-  `services` listed. `home` names one of the home configurations
+  where they have an account: an `admin` is on every host (or on the `hosts`
+  listed, if any), in `wheel`, and may deploy; anyone else is on the `hosts`
+  listed and on the hosts of the `services` listed. `home` names one of the home configurations
   (`<base>-<variant>`), installed through home-manager on those hosts, or is
   `{ default = …; <host> = …; }` for one per host. The
   access module (`fleet.access`, on as soon as a host has users) creates the
   accounts with the keys of `ssh.pub` and no password, turns off password and
   root login in sshd, lets admins sudo against their forwarded SSH agent
   (pam_rssh, with the same authorized keys), and puts every host's `ssh.pub`
-  (and `initrd.pub`) into `known_hosts`. Everything there is `mkDefault`.
-  A fleet with one person is `users/me/{user.nix,ssh.pub}` with
-  `{ admin = true; }`.
+  (and `initrd.pub`) into `known_hosts`. The policy settings (sshd, sudo,
+  `users.mutableUsers = false`) are `mkDefault`; the accounts are not. Note
+  that this switches on as soon as a host has a fleet user: the first
+  `users/<name>/` makes every host key-only, which is the point, but worth
+  knowing before the first deploy. A fleet with one person is
+  `users/me/{user.nix,ssh.pub}` with `{ admin = true; }`.
 - **Secrets** live next to what they belong to, one sops store each, and who
   can read a store follows from the layout:
 
@@ -126,13 +129,17 @@ Missing folders are skipped. Folder names can be changed with
   in a dev shell) is the fleet from the admin's machine, inside the repository:
 
   ```
-  fleetl secrets sync [--check]   .sops.yaml from the layout, re-key the stores
+  fleetl secrets sync [--check]   .sops.yaml from the layout; re-key the stores
+                                  whose recipients are not the rules' (--rekey: all)
   fleetl secrets edit <store>     sops on a store
   fleetl host init <name>         a host folder, its generators run (--age-key:
                                   a dedicated age key too)
   fleetl host generate <name>     the host's generators whose files are missing
   fleetl host install <name> <target> [--disk-key] [-- <nixos-anywhere args>]
                                   nixos-anywhere with the identity in place
+  fleetl host exec <name>|all [--user <u>] [--] <command...>
+                                  a command on a host, or on every host that is
+                                  not ignored, pinned to its ssh.pub
   fleetl host show | service show | user show <name>
   fleetl user init <name> [--admin] [--ssh-key <file>] [--pgp <fpr>] [--age <recipient>]
   ```
@@ -206,8 +213,11 @@ Three things live under `nixos/` besides hosts, and they are easy to mix up:
   such as `names` above), `role` (this host's roles in it) and `dir` (its
   folder). Layers a service lists are installed on its hosts. Every host sees
   every service as `fleet.services.<name>`, and its own as `fleet.self.services`;
-  `nixosServices.<name>` is the service as a plain module for any other
-  configuration. `home.nix` in a service folder is reserved for its home side.
+  `nixosServices.<name>` is the service as a plain module for another
+  configuration of the fleet (a VM test built from a host's `fleetArgs`, say):
+  it needs the same special arguments, and `service.role` is empty unless
+  that configuration sets `fleet.meta.host`. `home.nix` in a service folder is
+  reserved for its home side.
 - **State** (`fleet.state.<name> = { path; kind; units; service; }`) is what a
   host keeps: each entry is a btrfs subvolume (`@apps/<name>`, `@data/<name>` on
   `fleet.storage.btrfsDevice`) or ZFS dataset (`<pool>/apps/<name>`, on
@@ -228,11 +238,9 @@ Three things live under `nixos/` besides hosts, and they are easy to mix up:
   - `kind = "units"`: unit files linked in by a systemd generator, so an
     update needs only `daemon-reload` and a restart.
 
-  (The kinds were `apps` and `services`, and `units` was `services`, before
-  fleet services existed; the old names still work, with a warning.)
-
   Hosts list their layers in `host.nix`. Each layer's revision comes from
-  `ftl-layers.json`: `latest`, or the commit it last built at.
+  `ftl-layers.json`: `latest`, or the commit it last built at. A host with
+  layers needs `fleet.layers.repo`, which defaults to `mkFlake`'s `repo`.
 - **`fleet.builder`** (pipeline) verifies the signature on the branch tip, bumps
   flake inputs per lane, builds everything in `fleet.manifest` with
   `nix-fast-build`, pushes the (daemon-signed) results into a `file://` cache,
@@ -327,7 +335,9 @@ see whether the library still works with the channel's current head:
   homes in hosts, `static` everywhere, manifest, per-system checks,
   pass-through, renamed folders);
 - `cli`: the fixture's `.sops.yaml` is what `fleetl secrets render` makes of
-  its layout (the `fleet-sops` check);
+  its layout (the `fleet-sops` check); `fleetl host exec` runs on stubs and
+  reaches each host with the deploy output's address and login, pinned to
+  its `ssh.pub`;
 - VM tests:
   - `modules`: a `mkFlake` host with every ftl module enabled;
   - `state-btrfs`, `state-zfs`: `fleet.state` on an empty disk, then a

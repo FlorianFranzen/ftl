@@ -27,9 +27,10 @@
   sshOpts ? [ ],
   # hosts to leave out
   exclude ? [ ],
+  # nixpkgs' lib; deploy-rs carries one
+  lib ? deploy.inputs.nixpkgs.lib,
 }:
 let
-  lib = deploy.inputs.nixpkgs.lib or (import <nixpkgs> { }).lib;
 
   # Every host's SSH host key, under the name HostKeyAlias uses below.
   knownHosts = builtins.toFile "fleet-known-hosts" (

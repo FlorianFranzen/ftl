@@ -10,8 +10,7 @@
 #   users/   mkUsers     fleet.users, accounts on the hosts (through mkNixos)
 #
 # plus checks for all of them and `fleet.manifest`, consumed by the ftl
-# pipeline. Everything the library itself exports is below `fleet`; the former
-# `ftlPeers` and `ftlManifest` outputs remain as aliases with a warning.
+# pipeline. Everything the library itself exports is below `fleet`.
 # Missing folders are skipped; folder names can be changed with
 # `layout.<family> = "dir"` (or null to disable). Unrecognized arguments are
 # deep-merged into the outputs.
@@ -258,7 +257,7 @@ let
         ;
       # metadata of all hosts and services (`fleet.hosts` and `fleet.services`
       # in every host)
-      fleet.hosts = nixosOut.peers;
+      fleet.hosts = nixosOut.fleet.hosts;
       fleet.services = nixosOut.services;
       fleet.users = nixosOut.users;
       # every secret store and its recipients, for `fleetl secrets sync`
@@ -280,13 +279,9 @@ let
           meta.description = "The fleet from the admin's machine: secrets, hosts, users";
         };
       });
-      ftlPeers = lib.warn "ftl: the `ftlPeers` output is `fleet.hosts` now" nixosOut.peers;
     })
     (lib.optionalAttrs (checks != { }) { inherit checks; })
-    {
-      fleet.manifest = manifest;
-      ftlManifest = lib.warn "ftl: the `ftlManifest` output is `fleet.manifest` now" manifest;
-    }
+    { fleet.manifest = manifest; }
     passthru
   ];
 in

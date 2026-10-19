@@ -1,6 +1,8 @@
 # fleetl: the fleet from the admin's machine, inside the repository.
 #
-#   fleetl secrets sync [--check]       .sops.yaml from the layout, re-key the stores
+#   fleetl secrets sync [--check|--rekey]
+#                                       .sops.yaml from the layout; re-key the stores
+#                                       whose recipients are not the rules' (--rekey: all)
 #   fleetl secrets render               .sops.yaml for the `fleet.sops` JSON on stdin
 #   fleetl secrets edit <store>         sops on a store (creates it)
 #   fleetl host init <name> [--system <s>] [--age-key]
@@ -9,6 +11,9 @@
 #                                       run the host's generators whose files are missing
 #   fleetl host install <name> <target> [--disk-key] [-- <nixos-anywhere args>]
 #                                       install a host with its identity in place
+#   fleetl host exec <name>|all [--user <u>] [--] <command...>
+#                                       run a command on a host (all: every host that
+#                                       is not ignored), pinned to its ssh.pub
 #   fleetl host show <name>             a host: services, users, layers, keys, stores
 #   fleetl service show <name>          a service: hosts, roles, layers, data, store
 #   fleetl user init <name> [--admin] [--ssh-key <file>] [--pgp <fpr>] [--age <recipient>]
@@ -27,6 +32,12 @@ die() {
   echo "fleetl: $*" >&2
   exit 1
 }
+
+# Scratch space for private keys and plaintext, 0700, gone on any exit (a
+# `die` and errexit included, which a RETURN trap would miss).
+tmp="$(mktemp -d)"
+chmod 700 "$tmp"
+trap 'rm -rf "$tmp"' EXIT
 
 # Everything but `secrets render` works on the repository.
 in_repo() {
@@ -71,42 +82,76 @@ secrets_render() {
     }' <<<"$input" | yq -P
 }
 
+# The recipients a store should have, from the rules; and the ones it has,
+# which sops keeps in the clear.  Both as sorted lists of age recipients and
+# pgp fingerprints.
+rule_recipients() { # <store path>
+  local n i regex
+  n="$(yq '.creation_rules | length' .sops.yaml)"
+  for ((i = 0; i < n; i++)); do
+    regex="$(yq ".creation_rules[$i].path_regex" .sops.yaml)"
+    if [[ $1 =~ $regex ]]; then
+      yq ".creation_rules[$i].key_groups[] | (.age[]?, .pgp[]?)" .sops.yaml | sort -u
+      return 0
+    fi
+  done
+  return 1
+}
+
+store_recipients() { # <store path>
+  yq '.sops.age[]?.recipient, .sops.pgp[]?.fp' "$1" | sort -u
+}
+
+# .sops.yaml from the layout, and every existing store re-keyed to it where
+# its recipients differ (which needs the admin's key).  --check reports both
+# without changing anything; --rekey re-keys every store.
 secrets_sync() {
   in_repo
-  local check=0 tmp
-  case "${1:-}" in
-    --check) check=1 ;;
-    "") ;;
-    *) usage ;;
-  esac
+  local check=0 force=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --check) check=1 ;;
+      --rekey) force=1 ;;
+      *) usage ;;
+    esac
+    shift
+  done
 
-  tmp="$(mktemp)"
-  trap 'rm -f "$tmp"; trap - RETURN' RETURN
-  fleet_json sops | secrets_render >"$tmp"
-
-  if [ -f .sops.yaml ] && cmp -s "$tmp" .sops.yaml; then
+  # 1. the rules
+  fleet_json sops | secrets_render >"$tmp/sops.yaml"
+  if [ -f .sops.yaml ] && cmp -s "$tmp/sops.yaml" .sops.yaml; then
     echo ".sops.yaml is up to date"
+  elif [ "$check" = 1 ]; then
+    [ -f .sops.yaml ] && diff -u .sops.yaml "$tmp/sops.yaml" || true
+    die ".sops.yaml is stale; run fleetl secrets sync"
+  else
+    [ -f .sops.yaml ] && diff -u .sops.yaml "$tmp/sops.yaml" || true
+    install -m 644 "$tmp/sops.yaml" .sops.yaml
+    echo "wrote .sops.yaml"
+  fi
+
+  # 2. the stores: those whose recipients are not the rules'
+  local store stale=() failed=()
+  while IFS= read -r store; do
+    [ -f "$store" ] || continue
+    if [ "$force" = 1 ] || ! cmp -s <(rule_recipients "$store") <(store_recipients "$store"); then
+      stale+=("$store")
+    fi
+  done < <(fleet_json sops | jq -r '.stores[].path')
+  if [ "${#stale[@]}" = 0 ]; then
+    echo "every store has the recipients of its rule"
     return 0
   fi
   if [ "$check" = 1 ]; then
-    diff -u .sops.yaml "$tmp" || true
-    die ".sops.yaml is stale; run fleetl secrets sync"
+    printf '%s: recipients differ from its rule\n' "${stale[@]}"
+    die "run fleetl secrets sync"
   fi
-
-  if [ -f .sops.yaml ]; then diff -u .sops.yaml "$tmp" || true; fi
-  install -m 644 "$tmp" .sops.yaml
-  echo "wrote .sops.yaml"
-
-  # Re-key every store that exists, so their data keys match the rules.
-  local store failed=()
-  while IFS= read -r store; do
-    if [ -f "$store" ]; then
-      echo "updating keys of $store"
-      sops updatekeys -y "$store" || failed+=("$store")
-    fi
-  done < <(fleet_json sops | jq -r '.stores[].path')
+  for store in "${stale[@]}"; do
+    echo "re-keying $store"
+    sops updatekeys -y "$store" || failed+=("$store")
+  done
   if [ "${#failed[@]}" -gt 0 ]; then
-    die "could not update the keys of: ${failed[*]}"
+    die "could not re-key: ${failed[*]}"
   fi
 }
 
@@ -223,11 +268,6 @@ host_generate() {
     mapfile -t wanted < <(jq -r '.generators[]' <<<"$host")
   fi
 
-  local tmp
-  tmp="$(mktemp -d)"
-  # (a RETURN trap outlives the function: clear it when it has run)
-  trap 'rm -rf "$tmp"; trap - RETURN' RETURN
-  chmod 700 "$tmp"
 
   # 1. run what is missing; public files go next to host.nix right away
   local gen spec f secret st
@@ -264,9 +304,12 @@ host_generate() {
   done
   [ "${#ran[@]}" = 0 ] && return 0
 
-  # the public files may have made the host a recipient
+  # the public files may have made the host a recipient (of its own store,
+  # and of its services'); the rules follow here, the re-keying of existing
+  # stores is `fleetl secrets sync`, which needs the admin's key
   git add -N "$dir"
-  fleet_json sops | secrets_render >.sops.yaml
+  fleet_json sops | secrets_render >"$tmp/sops.yaml"
+  install -m 644 "$tmp/sops.yaml" .sops.yaml
 
   # 2. the secret files, into the stores: all at once into a new store, one
   #    by one into an existing one
@@ -275,27 +318,28 @@ host_generate() {
     path="$dir/$store.yaml"
     doc="$tmp/$store.yaml"
     : >"$doc"
-    local -a sets=()
+    local -a keys=() files=()
     for gen in "${ran[@]}"; do
       spec="$(jq --arg g "$gen" '.[$g]' <<<"$gens")"
       while IFS= read -r f; do
         if [ "$store" = identity ]; then
           F="$f" V="$(cat "$tmp/$gen/$f")" yq -i '.[strenv(F)] = strenv(V)' "$doc"
-          sets+=("[\"$f\"]	$tmp/$gen/$f")
+          keys+=("[\"$f\"]")
         else
           G="$gen" F="$f" V="$(cat "$tmp/$gen/$f")" yq -i '.[strenv(G)][strenv(F)] = strenv(V)' "$doc"
-          sets+=("[\"$gen\"][\"$f\"]	$tmp/$gen/$f")
+          keys+=("[\"$gen\"][\"$f\"]")
         fi
+        files+=("$tmp/$gen/$f")
       done < <(jq -r --arg s "$store" \
         '.files | to_entries[] | select(.value.secret == true and (.value.store // "secrets") == $s) | .key' <<<"$spec")
     done
-    [ "${#sets[@]}" = 0 ] && continue
+    [ "${#keys[@]}" = 0 ] && continue
     if [ -f "$path" ]; then
-      echo "$store.yaml: adding ${#sets[@]} secret(s) (needs your key)"
-      local entry
-      for entry in "${sets[@]}"; do
-        sops set "$path" "${entry%%	*}" "$(jq -Rs . <"${entry#*	}")" ||
-          die "could not add ${entry%%	*} to $path"
+      echo "$store.yaml: adding ${#keys[@]} secret(s) (needs your key)"
+      local i
+      for i in "${!keys[@]}"; do
+        sops set "$path" "${keys[$i]}" "$(jq -Rs . <"${files[$i]}")" ||
+          die "could not add ${keys[$i]} to $path"
       done
     else
       echo "$store.yaml: written"
@@ -322,10 +366,6 @@ host_install() {
   local identity="nixos/hosts/$name/identity.yaml"
   [ -f "$identity" ] || die "no $identity; fleetl host init $name first"
 
-  local tmp
-  tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"; trap - RETURN' RETURN
-  chmod 700 "$tmp"
 
   local extra="$tmp/extra" keys
   install -d -m 755 "$extra/etc/ssh"
@@ -362,6 +402,60 @@ host_install() {
   nixos-anywhere "${args[@]}" "$@"
 }
 
+# A command on one host, or on every host that is not ignored, one after the
+# other.  The address and the login are those of the deploy output when the
+# repository has one (mkDeploy: `address`, `sshUser`), else the host's fqdn or
+# name and root; the connection is pinned to the host's ssh.pub like a deploy.
+# FLEETL_SSH replaces the ssh program (tests).
+host_exec() {
+  in_repo
+  local name="${1:?usage: fleetl host exec <name>|all [--user <u>] [--] <command...>}"
+  shift
+  local user=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --user) user="${2:?--user needs a name}"; shift 2 ;;
+      --) shift; break ;;
+      -*) usage ;;
+      *) break ;;
+    esac
+  done
+  [ $# -gt 0 ] || die "host exec: no command given"
+
+  local hosts
+  hosts="$(fleet_json hosts)"
+  local -a names
+  if [ "$name" = all ]; then
+    mapfile -t names < <(jq -r 'to_entries[] | select(.value.importance != "ignored") | .key' <<<"$hosts")
+  else
+    jq -e --arg h "$name" 'has($h)' <<<"$hosts" >/dev/null || die "no host '$name'"
+    names=("$name")
+  fi
+  [ -n "$user" ] || user="$(nix eval --raw .#deploy.sshUser 2>/dev/null || echo root)"
+
+  local h address key status=0
+  for h in "${names[@]}"; do
+    address="$(nix eval --raw ".#deploy.nodes.\"$h\".hostname" 2>/dev/null || jq -r --arg h "$h" '.[$h].fqdn // $h' <<<"$hosts")"
+    key="$(jq -r --arg h "$h" '.[$h].keys.ssh // empty' <<<"$hosts")"
+    local -a opts=()
+    if [ -n "$key" ]; then
+      echo "$h $key" >"$tmp/known_hosts.$h"
+      opts=(-o "HostKeyAlias=$h" -o "UserKnownHostsFile=$tmp/known_hosts.$h" -o StrictHostKeyChecking=yes)
+    else
+      echo "fleetl: $h has no ssh.pub, trusting your known_hosts" >&2
+    fi
+    if [ "$name" = all ]; then
+      echo "== $h ($user@$address)" >&2
+    fi
+    "${FLEETL_SSH:-ssh}" "${opts[@]}" "$user@$address" -- "$@" || {
+      status=$?
+      [ "$name" = all ] || exit "$status"
+      echo "fleetl: $h: exit $status" >&2
+    }
+  done
+  exit "$status"
+}
+
 # --- user ----------------------------------------------------------------------
 
 user_init() {
@@ -390,8 +484,8 @@ user_init() {
 EOF
 
   if [ -n "$sshkey" ]; then
-    cut -d' ' -f1,2 "$sshkey" >"$dir/ssh.pub"
-  elif ssh-add -L >"$dir/ssh.pub" 2>/dev/null; then
+    awk '{ print $1, $2 }' "$sshkey" >"$dir/ssh.pub"
+  elif ssh-add -L 2>/dev/null | awk '{ print $1, $2 }' >"$dir/ssh.pub" && [ -s "$dir/ssh.pub" ]; then
     echo "ssh.pub: the keys of the running ssh-agent"
   else
     rm -f "$dir/ssh.pub"
@@ -429,6 +523,7 @@ case "${1:-}" in
       init) shift 2; host_init "$@" ;;
       generate) shift 2; host_generate "$@" ;;
       install) shift 2; host_install "$@" ;;
+      exec) shift 2; host_exec "$@" ;;
       show) show hosts "${3:?usage: fleetl host show <name>}" ;;
       *) usage ;;
     esac

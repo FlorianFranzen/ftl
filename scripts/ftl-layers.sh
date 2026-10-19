@@ -35,8 +35,7 @@ notify() {
     log "ntfy notification failed"
 }
 
-# units layers were called "services" layers; old meta.json files still say so.
-is_units() { [ "$1" = units ] || [ "$1" = services ]; }
+is_units() { [ "$1" = units ]; }
 
 kind_of() { # name
   local entry
