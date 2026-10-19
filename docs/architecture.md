@@ -214,7 +214,8 @@ under `fleet.*`.
 | `client` | `fleet.client.*` | substituters, gc defaults, `ftl-status` | no |
 | `layers` | `fleet.layers.*` (`installed` set by mkNixos, `repo`, `verify`, timer) | `environment.profiles` for packages layers, a systemd generator linking units layers, `ftl-layers` and its update service and timer, `fleet.layers.hook` | `installed` comes from mkNixos; settable by hand |
 | `comin` | `fleet.comin.*`, whether comin's and lanzaboote's modules are present | `services.comin.postDeploymentCommand` = the hook (system profile sync for lanzaboote, then layer update) | no |
-| `state` | `fleet.state.<name>` (`path`, `kind`, `units`, `service`, `backup`, `snapshots`, `zfs.properties`), `fleet.storage` (`btrfsDevice`, `zfsPool`, `zfsProperties`) | the `fleet-state` service creating subvolumes/datasets, one mount unit per entry, `RequiresMountsFor` on its units, an assertion that its units run with fixed uids or `DynamicUser` | no |
+| `state` | `fleet.state.<name>` (`path`, `kind`, `units`, `service`, `backup`, `snapshots`, `zfs.properties`), `fleet.storage` (`btrfsDevice`, `zfsPool`, `zfsProperties`, `tool.enable`) | the `fleet-state` service creating subvolumes/datasets, one mount unit per entry, `RequiresMountsFor` on its units, an assertion that its units run with fixed uids or `DynamicUser`; the `fleet-state` tool and `/etc/fleet-state/state.json` (backend, device or pool, host, entries) | no |
+| `backup` | `fleet.backup.*` (`repositories.<kind>`, `passwordFile`, `credentialFiles`, `packages`, `schedule`, `retention`, `metrics.textfileDir`), `fleet.state` | `/etc/rustic/<kind>.toml` (also `fleet.backup.profiles`), `/etc/fleet-state/backup.json`, the `fleet-backup` service and timer (`fleet-state backup --all`), `fleet-backup-init` | no |
 | `access` | `fleet.access.*` (`users` defaults to the host's fleet users, `sudo`, `knownHosts`, `initrdPort`); the `fleet` argument when present | accounts with keys and no password, sshd without passwords or root, sudo via pam_rssh, every host's keys in `known_hosts` | `users` and `knownHosts` need `fleet`; standalone, set `fleet.access.users` |
 | `secrets` | `fleet.secrets.*` (`file`, `shared` and `ageKeyFile` set by mkNixos); whether sops-nix's module is present | `sops.defaultSopsFile`, `sops.age.keyFile`, `sops.gnupg.sshKeyPaths = []`; `shared` for modules to point a secret at | `file` comes from mkNixos; settable by hand |
 | `scripts` (a function, not a module) | `pkgs` | the packaged scripts: `fleetl` (+`ftl` alias), `ftl-layers`, `ftl-status`, `ftl-pipeline`, `ftl-cache-retention` | no |
@@ -272,6 +273,17 @@ arguments; stores need `root`.
   is not ignored) at the deploy output's address and login (else the host's
   `fqdn` or name, and root), pinned to its `ssh.pub` the way `mkDeploy` pins
   deploys. Temporary directories are `0700` and removed on any exit.
+- `fleet-state.sh` (hosts, as root; packaged by `modules/state.nix` with the
+  host's ZFS or btrfs tools): reads `/etc/fleet-state/state.json` and, with
+  backups on, `backup.json` and `/etc/rustic/<kind>.toml`. Every operation
+  on an entry's content works on a read-only snapshot of its dataset or
+  subvolume (ZFS: `<dataset>@<tag>`, mounted below a scratch directory;
+  btrfs: `@fleet-snapshots/<entry>@<tag>` on the top level), never on what
+  happens to be mounted at its path. `backup` labels each rustic snapshot
+  with the entry, records the host, tags `fleet-entry:` and
+  `fleet-service:`; `--all` prunes and writes the metrics. Snapshots,
+  mounts and scratch space are undone on any exit, signals included; one
+  mutating run at a time (`/run/fleet-state.lock`).
 - `ftl-layers.sh` (hosts): environment from `modules/layers.nix`
   (`FTL_REPO_URL`, `FTL_LAYERS`, `FTL_STATE_DIR`, `FTL_PROFILE_DIR`,
   `FTL_VERIFY_MODE`, ...); installs each layer's `nixosLayers.<sys>.<l>` at

@@ -76,6 +76,14 @@ in
     inherit pkgs ftl;
     backend = "zfs";
   };
+  backup-btrfs = import ./backup.nix {
+    inherit pkgs ftl;
+    backend = "btrfs";
+  };
+  backup-zfs = import ./backup.nix {
+    inherit pkgs ftl;
+    backend = "zfs";
+  };
   layers = import ./layers.nix { inherit pkgs ftl nixpkgs; };
   pipeline = import ./pipeline.nix { inherit pkgs ftl nixpkgs; };
   pipeline-agent = import ./pipeline-agent.nix { inherit pkgs ftl nixpkgs; };

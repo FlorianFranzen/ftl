@@ -239,7 +239,29 @@ Three things live under `nixos/` besides hosts, and they are easy to mix up:
   service.name` moves with the service: its declaration, and its contents
   (`fleetl service show` lists them). A unit of an entry must run with a fixed
   uid or as `DynamicUser`, or evaluation fails: dynamically allocated uids
-  live on the root filesystem and would not survive a reinstall.
+  live on the root filesystem and would not survive a reinstall. On the
+  host, `fleet-state` (as root) lists the entries and backs them up.
+- **Backups** (`fleet.backup`) put every entry with `backup = true` into a
+  rustic repository per kind (`repositories.state`, `repositories.data`),
+  daily by default and pruned by `retention`. Each backup is taken from a
+  snapshot of the entry's dataset or subvolume, so services keep running,
+  and is recorded under the entry's real path, with the entry as label, the
+  host as host and `fleet-entry:<entry>`, `fleet-service:<service>` as tags.
+  Repositories are only created by `fleet-state init` (or the
+  `fleet-backup-init` service), never by a backup. `/etc/rustic/<kind>.toml`
+  makes them usable by hand (`rustic -P state snapshots`);
+  `metrics.textfileDir` writes `fleet_backup_last_success_timestamp_seconds`
+  and `fleet_backup_snapshots{kind}` for node_exporter.
+
+  ```nix
+  fleet.backup = {
+    enable = true;
+    repositories.state = { repository = "opendal:sftp"; options = { endpoint = "…"; key = "/run/secrets/backup-key"; }; };
+    passwordFile = "/run/secrets/backup-password";
+    credentialFiles.ssh-key = "/run/secrets/backup-key";
+    packages = [ pkgs.openssh ];
+  };
+  ```
 
 - **Layers** (`nixos/layers/<name>.nix`, `{ kind; packages = pkgs: [ … ]; units; }`)
   are independently versioned Nix profiles under
@@ -354,6 +376,10 @@ see whether the library still works with the channel's current head:
   - `modules`: a `mkFlake` host with every ftl module enabled;
   - `state-btrfs`, `state-zfs`: `fleet.state` on an empty disk, then a
     filesystem or pool;
+  - `backup-btrfs`, `backup-zfs`: `fleet.backup` into a local repository:
+    init only by hand, labels, tags and hosts of the snapshots, owners kept,
+    the entry backed up rather than what is mounted at its path, no
+    snapshot or scratch directory left, a vanished repository failing;
   - `services`: `fleet.secrets` with sops-nix for real: a host decrypts its own
     store and a service's with its SSH host key, no age key installed;
   - `layers`: layer install, update, pins and rollback, plus the comin hook;

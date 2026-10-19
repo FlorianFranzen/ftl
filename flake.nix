@@ -19,6 +19,7 @@
         layers = ./modules/layers.nix;
         comin = ./modules/comin.nix;
         state = ./modules/state.nix;
+        backup = ./modules/backup.nix;
         access = ./modules/access.nix;
         secrets = ./modules/secrets.nix;
         default.imports = import ./modules/all.nix;
