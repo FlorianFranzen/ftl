@@ -149,12 +149,16 @@ each library function and module reads, provides and does.
                                   a command on a host, or on every host that is
                                   not ignored, pinned to its ssh.pub
   fleetl host show | service show | user show <name>
+  fleetl service move <service> <to> [--from <host>] [--without-data] [--no-backup] [--yes]
+                                  the service and its state to another host
   fleetl state list | snapshots <host> [<entry>]
   fleetl state size | stop | start <host> <entry>...
   fleetl state backup <host> --all|<entry>...
   fleetl state restore <host> <entry> [--snapshot <id>] [--from-host <h>] [--no-start]
   fleetl state rollback <host> <entry> [<aside>]
   fleetl state discard <host> <aside>
+  fleetl state thaw <host> <entry>...
+  fleetl state drop <host> <entry> <kind>
                                   fleet-state on the host, as root (sudo through
                                   the forwarded agent unless the login is root)
   fleetl fleet generate [--force] [<generator>...]
@@ -275,6 +279,34 @@ Three things live under `nixos/` besides hosts, and they are easy to mix up:
   destroys one, `fleetl state list` shows them. `stop` and `start` do the
   unit part alone; a stopped entry's units refuse to start until `start`
   (a drop-in in `/run`, so a reboot lifts it).
+- **Moving a service** with its state is one command, then a commit and two
+  deploys:
+
+  ```
+  fleetl service move web darwin          # from the one host web runs on
+  git commit -am 'web: on darwin'         # then deploy darwin, then the old host
+  fleetl state drop amphi web state       # once darwin runs it well
+  ```
+
+  It checks where the service runs, which entries are its (`service =
+  service.name`), that the target has `fleet-state` and none of them, shows
+  their sizes and asks. Then it replaces the old host by the new one in
+  `service.nix`, in `hosts` and every role, and refuses if evaluating it
+  shows any other change. On the old host the entries are stopped (and
+  blocked), the ones backed up get a last backup, each entry is streamed
+  from a snapshot into a new dataset or subvolume on the target (through
+  the admin's machine, as a tar with owners, ACLs and xattrs, so between
+  btrfs and ZFS alike), and the old copies are frozen: read-only, their
+  units blocked. Last, `secrets sync` re-keys the service's store for the
+  target. Until that point a failure undoes everything: `service.nix` back,
+  what reached the target dropped, the entries started again. The service
+  is down from the stop until the target runs the new configuration; the
+  target's datasets are there before its deploy, so it starts on its
+  state, never on an empty one. `--from` picks the host of a service on
+  several, `--without-data` leaves the `data` entries behind (copy them
+  later, or obtain them again), `--no-backup` skips the last backup. The
+  target needs `fleet-state` before it has entries of its own:
+  `fleet.storage.tool.enable` on a host without a ZFS pool or entries.
 
   ```nix
   fleet.backup = {
@@ -408,6 +440,12 @@ see whether the library still works with the channel's current head:
     inside another left alone, what needs the units, timers and a template
     unit's socket stopped and started again, units blocked while stopped,
     leftover snapshots replaced, a failing entry not failing the others;
+  - `move`: `fleetl service move` from a btrfs host to a ZFS host through
+    an admin machine (stubbed evaluation, real ssh and `fleet-state`):
+    refusals, a failed move undone without touching what was in the way,
+    then a move whose target, once switched to the moved configuration,
+    runs the service on the received state (content, owners, xattrs, ZFS
+    properties), and whose source lets go and drops its frozen copy;
   - `services`: `fleet.secrets` with sops-nix for real: a host decrypts its own
     store and a service's with its SSH host key, no age key installed;
   - `layers`: layer install, update, pins and rollback, plus the comin hook;

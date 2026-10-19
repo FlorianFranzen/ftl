@@ -23,6 +23,22 @@
 #                                          default) back in; the current one goes aside
 #   fleet-state discard <aside>            destroy a copy kept aside
 #
+# Moving an entry to another host (fleetl service move drives these):
+#
+#   fleet-state send <entry>               the entry, from a snapshot of it, as a tar
+#                                          stream on stdout
+#   fleet-state receive <entry> <kind> [--replace]
+#                                          a tar stream on stdin into a new dataset or
+#                                          subvolume for the entry, which this host need
+#                                          not declare yet; an existing one is refused,
+#                                          or with --replace swapped out and kept aside
+#   fleet-state freeze <entry>...          stopped, blocked and read-only: the copy left
+#                                          behind cannot change any more (until a reboot
+#                                          lifts the block, the read-only stays)
+#   fleet-state thaw <entry>...            undo freeze
+#   fleet-state drop <entry> <kind>        destroy what a move left behind of an entry
+#                                          this host no longer declares
+#
 # What the host keeps is described by /etc/fleet-state/state.json (written by
 # the state module), its backups by /etc/fleet-state/backup.json and the rustic
 # profiles /etc/rustic/<kind>.toml (the backup module).  A backup is a rustic
@@ -792,6 +808,155 @@ cmd_discard() {
   log "$aside destroyed"
 }
 
+# --- moving --------------------------------------------------------------------
+
+tar_flags=(--xattrs --xattrs-include='*' --acls --numeric-owner --sparse)
+
+cmd_send() {
+  [ $# = 1 ] || usage
+  local name="$1"
+  need_entry "$name"
+  [ ! -t 1 ] || die "send writes a tar stream; pipe it somewhere"
+  lock
+  snapshot_take "$name" fleet-send
+  log "$name: sending $(du -shx "$snapdir" | cut -f1)"
+  tar -C "$snapdir" -c "${tar_flags[@]}" -f - .
+}
+
+cmd_receive() {
+  local name="" kind="" replace=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --replace) replace=1 ;;
+      -*) usage ;;
+      *)
+        if [ -z "$name" ]; then
+          name="$1"
+        elif [ -z "$kind" ]; then
+          kind="$1"
+        else
+          usage
+        fi
+        ;;
+    esac
+    shift
+  done
+  [ -n "$kind" ] || usage
+  [[ $name =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || die "'$name' is not an entry name"
+  [ ! -t 0 ] || die "receive reads a tar stream (fleet-state send) on stdin"
+
+  local loc incoming
+  loc="$(location_of "$name" "$kind")"
+  if has_entry "$name" && [ "$(field "$name" location)" != "$loc" ]; then
+    die "$name is declared here as $(field "$name" location), not $loc"
+  fi
+
+  lock
+  if location_exists "$loc" && [ "$replace" = 0 ]; then
+    die "$loc exists on $host (--replace swaps it out and keeps it aside)"
+  fi
+  incoming="$loc.incoming"
+  if location_exists "$incoming"; then
+    log "$name: removing an incomplete receive ($incoming)"
+    destroy_location "$incoming"
+  fi
+  create_location "$incoming"
+  cleanups+=("destroy_if_exists '$incoming'")
+  open_location "$incoming"
+  log "$name: receiving into $loc"
+  tar -C "$opened" -x "${tar_flags[@]}" --same-permissions -f -
+  close_location "$opened"
+  place "$name" "$incoming" "$loc"
+}
+
+# place <entry> <incoming> <location>: what was received becomes the entry's;
+# if the host uses the entry already, swapped in.
+place() {
+  local name="$1" incoming="$2" loc="$3" aside
+  if has_entry "$name" && location_exists "$loc"; then
+    swap_in "$name" "$incoming"
+  else
+    if location_exists "$loc"; then
+      aside="$(aside_name "$loc")"
+      rename_location "$loc" "$aside"
+      log "$name: what was there is kept aside as $aside"
+    fi
+    rename_location "$incoming" "$loc"
+    if has_entry "$name"; then
+      apply_properties "$name" "$loc"
+      log "$name: received (fleet-state start $name)"
+    else
+      log "$name: received; in use once this host declares it"
+    fi
+  fi
+}
+
+set_readonly() { # <location> <on|off>
+  if [ "$backend" = zfs ]; then
+    if [ "$2" = on ]; then zfs set readonly=on "$1"; else zfs inherit readonly "$1"; fi
+  else
+    btrfs property set -ts "$top/$1" ro "$([ "$2" = on ] && echo true || echo false)"
+  fi
+}
+
+# Stopped (unless stop already did), blocked and read-only, so that the copy
+# a move leaves behind cannot diverge from the one moved.
+cmd_freeze() {
+  [ $# -gt 0 ] || usage
+  local name
+  local -a fresh=()
+  for name in "$@"; do
+    need_entry "$name"
+    [ -f "$records/$name.blocked" ] || fresh+=("$name")
+  done
+  lock
+  if [ "${#fresh[@]}" -gt 0 ]; then
+    quiesce "${fresh[@]}"
+  fi
+  for name in "$@"; do
+    set_readonly "$(field "$name" location)" on
+    log "$name: frozen ($(field "$name" location) read-only, its units blocked)"
+  done
+}
+
+cmd_thaw() {
+  [ $# -gt 0 ] || usage
+  local name
+  for name in "$@"; do need_entry "$name"; done
+  lock
+  for name in "$@"; do
+    set_readonly "$(field "$name" location)" off
+  done
+  resume "$@"
+}
+
+cmd_drop() {
+  [ $# = 2 ] || usage
+  local name="$1" kind="$2" loc m snap
+  ! has_entry "$name" || die "$name is still declared on $host; drop is for what a move left behind"
+  loc="$(location_of "$name" "$kind")"
+  lock
+  location_exists "$loc" || die "no $loc on $host"
+  # unmounted wherever it is still mounted
+  if [ "$backend" = zfs ]; then
+    while IFS= read -r m; do
+      if [ -n "$m" ]; then umount "$m"; fi
+    done < <(findmnt -n -l -o TARGET --source "$loc" || true)
+  else
+    while IFS= read -r m; do
+      if [ -n "$m" ]; then umount "$m"; fi
+    done < <(findmnt -n -l -o TARGET,FSROOT | awk -v r="/$loc" '$2 == r { print $1 }')
+    for snap in "$top/@fleet-snapshots/$name@"*; do
+      if [ -e "$snap" ]; then btrfs subvolume delete "$snap" >/dev/null; fi
+    done
+  fi
+  # a freeze's block, if the host has not rebooted since
+  unblock "$name"
+  rm -f "$records/$name.stopped"
+  destroy_location "$loc"
+  log "$name: $loc destroyed"
+}
+
 # --- listing -------------------------------------------------------------------
 
 cmd_list() {
@@ -840,5 +1005,10 @@ case "$1" in
   restore) shift; cmd_restore "$@" ;;
   rollback) shift; cmd_rollback "$@" ;;
   discard) shift; cmd_discard "$@" ;;
+  send) shift; cmd_send "$@" ;;
+  receive) shift; cmd_receive "$@" ;;
+  freeze) shift; cmd_freeze "$@" ;;
+  thaw) shift; cmd_thaw "$@" ;;
+  drop) shift; cmd_drop "$@" ;;
   *) usage ;;
 esac

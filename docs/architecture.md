@@ -275,7 +275,13 @@ arguments; stores need `root`.
   deploys; `state` runs `fleet-state` on a host as root, its arguments
   quoted for the remote shell (bash's `printf %q`), through `sudo` with the
   agent forwarded (pam_rssh) unless the login is root; root on that host
-  can use the agent while it is forwarded. Temporary directories are `0700` and
+  can use the agent while it is forwarded. `service move` reads the
+  service from `fleet.services`, its entries from the old host's
+  `nixosConfigurations.<h>.config.fleet.state` and the new host's for
+  collisions, edits `service.nix` with a string replacement it checks by
+  evaluating `fleet.services` again, then drives `fleet-state` on both
+  hosts (`stop`, `backup`, `send | receive`, `freeze`) and `secrets sync`,
+  recording an undo step after each step that succeeded. Temporary directories are `0700` and
   removed on any exit.
 - `fleet-state.sh` (hosts, as root; packaged by `modules/state.nix` with the
   host's ZFS or btrfs tools): reads `/etc/fleet-state/state.json` (backend,
@@ -301,6 +307,14 @@ arguments; stores need `root`.
     entry failed and writes the metrics (the last success kept when not).
     Steps that may fail alone run in a subshell outside any condition, so
     errexit holds in them.
+  - Moves: `send` streams a snapshot as a tar (numeric owners, ACLs,
+    xattrs, sparse files); `receive` untars into `<location>.incoming` and
+    renames it into place (swapped in if the host uses the entry already;
+    refused if the location exists, unless `--replace`), the entry need not
+    be declared; `freeze` quiesces (unless a `stop` did) and sets the
+    dataset or subvolume read-only; `thaw` undoes it; `drop` destroys the
+    location of an entry the host no longer declares, with its leftover
+    snapshots and blocks.
   - Snapshots, mounts and scratch space are undone on any exit, signals
     included; one changing run at a time (`/run/fleet-state.lock`).
 - `ftl-layers.sh` (hosts): environment from `modules/layers.nix`

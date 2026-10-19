@@ -84,6 +84,8 @@ in
     inherit pkgs ftl;
     backend = "zfs";
   };
+  # fleetl service move between a btrfs and a ZFS host
+  move = import ./move.nix { inherit pkgs ftl; };
   layers = import ./layers.nix { inherit pkgs ftl nixpkgs; };
   pipeline = import ./pipeline.nix { inherit pkgs ftl nixpkgs; };
   pipeline-agent = import ./pipeline-agent.nix { inherit pkgs ftl nixpkgs; };

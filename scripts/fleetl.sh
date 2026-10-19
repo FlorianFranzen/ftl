@@ -17,6 +17,11 @@
 #                                       is not ignored), pinned to its ssh.pub
 #   fleetl host show <name>             a host: services, users, layers, keys, stores
 #   fleetl service show <name>          a service: hosts, roles, layers, data, store
+#   fleetl service move <name> <to> [--from <host>] [--without-data] [--no-backup] [--yes]
+#                                       move a service with its state: service.nix
+#                                       edited, its entries stopped, backed up and
+#                                       streamed to <to>, frozen on <from>, the stores
+#                                       re-keyed; then commit and deploy both
 #   fleetl state list <host>            the host's state entries, and copies kept aside
 #   fleetl state size|stop|start <host> <entry>...
 #   fleetl state snapshots <host> [<entry>]
@@ -29,6 +34,9 @@
 #                                       kept aside)
 #   fleetl state rollback <host> <entry> [<aside>]
 #   fleetl state discard <host> <aside> swap a copy kept aside back in; destroy one
+#   fleetl state thaw <host> <entry>...  undo the freeze a move left
+#   fleetl state drop <host> <entry> <kind>
+#                                       destroy what a move left behind
 #   fleetl fleet generate [--force] [<generator>...]
 #                                       run the fleet's generators whose files are missing
 #   fleetl fleet show                   the fleet: hosts, services, users, keys, stores
@@ -636,6 +644,173 @@ host_exec() {
 
 # --- state ---------------------------------------------------------------------
 
+# A host's fleet.state as its configuration in the repository has it.
+host_state() { # <host>
+  nix eval --json ".#nixosConfigurations.\"$1\".config.fleet.state" \
+    --apply 's: builtins.mapAttrs (_: e: { inherit (e) kind path service backup; }) s'
+}
+
+host_backup_on() { # <host>
+  [ "$(nix eval --json ".#nixosConfigurations.\"$1\".config.fleet.backup.enable" 2>/dev/null)" = true ]
+}
+
+# fleetl service move <service> <to> [--from <host>] [--without-data] [--no-backup] [--yes]
+#
+#   1. checks: where the service runs and its state there, that <to> has
+#      fleet-state and none of the entries, the sizes; asks.
+#   2. service.nix: <from> becomes <to> in its hosts and roles (checked by
+#      evaluating it again; anything else changing is refused).
+#   3. on <from>: the entries stopped (and blocked), a last backup of those
+#      backed up, each entry streamed into <to> (fleet-state send | receive,
+#      through this machine), the entries frozen: read-only, units blocked.
+#   4. secrets sync: the service's store re-keyed for <to>.
+#   On a failure before the end everything is undone: service.nix back, what
+#   reached <to> dropped, the entries started again on <from>.  Afterwards:
+#   commit, deploy <to> (the state is there) and <from> (the service goes),
+#   then `fleetl state drop <from> <entry> <kind>` for the frozen copies.
+service_move() {
+  in_repo
+  local svc="${1:?usage: fleetl service move <service> <to> [--from <host>] [--without-data] [--no-backup] [--yes]}"
+  local to="${2:?usage: fleetl service move <service> <to> [--from <host>] [--without-data] [--no-backup] [--yes]}"
+  shift 2
+  local from="" nodata=0 nobackup=0 yes=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --from) from="${2:?--from needs a host}"; shift ;;
+      --without-data) nodata=1 ;;
+      --no-backup) nobackup=1 ;;
+      --yes) yes=1 ;;
+      *) usage ;;
+    esac
+    shift
+  done
+
+  # --- 1. checks
+  local services service
+  services="$(fleet_json services)"
+  service="$(jq -e --arg s "$svc" '.[$s]' <<<"$services")" || die "no service '$svc'"
+  hosts_json="$(fleet_json hosts)"
+  jq -e --arg h "$to" 'has($h)' <<<"$hosts_json" >/dev/null || die "no host '$to'"
+  local -a runs
+  mapfile -t runs < <(jq -r '.hosts[]' <<<"$service")
+  if [ -z "$from" ]; then
+    [ "${#runs[@]}" = 1 ] || die "$svc runs on ${runs[*]:-no host}; say which with --from"
+    from="${runs[0]}"
+  fi
+  jq -e --arg h "$from" '.hosts | index($h)' <<<"$service" >/dev/null || die "$svc does not run on $from"
+  ! jq -e --arg h "$to" '.hosts | index($h)' <<<"$service" >/dev/null || die "$svc runs on $to already"
+  local file="nixos/services/$svc/service.nix"
+  [ -f "$file" ] || die "no $file: the service is not declared there, move it by hand"
+
+  local state entries taken
+  state="$(host_state "$from")"
+  entries="$(jq -c --arg s "$svc" 'with_entries(select(.value.service == $s))' <<<"$state")"
+  taken="$(host_state "$to" | jq -r --argjson e "$entries" '[keys[] | select($e[.] != null)] | join(" ")')"
+  [ -z "$taken" ] || die "$to has entries of the same name already: $taken"
+  local -a names moving backups
+  mapfile -t names < <(jq -r 'keys[]' <<<"$entries")
+  if [ "$nodata" = 1 ]; then
+    mapfile -t moving < <(jq -r 'to_entries[] | select(.value.kind != "data") | .key' <<<"$entries")
+  else
+    moving=("${names[@]}")
+  fi
+  backups=()
+  if [ "$nobackup" = 0 ] && [ "${#names[@]}" -gt 0 ] && host_backup_on "$from"; then
+    mapfile -t backups < <(jq -r 'to_entries[] | select(.value.backup) | .key' <<<"$entries")
+  fi
+  if [ "${#names[@]}" -gt 0 ]; then
+    as_root "$to" fleet-state list >/dev/null ||
+      die "fleet-state does not work on $to: set fleet.storage.tool.enable there (with fleet.storage) and deploy it first"
+  fi
+
+  echo "move $svc: $from -> $to"
+  if [ "${#names[@]}" = 0 ]; then
+    echo "  no state"
+  else
+    local sizes
+    sizes="$(as_root "$from" fleet-state size "${names[@]}")"
+    jq -r --arg sizes "$sizes" --arg moving " ${moving[*]} " '
+      ($sizes | split("\n") | map(select(. != "") | split("\t") | {(.[0]): (.[1] | tonumber)}) | add // {}) as $sz |
+      to_entries[] | .key as $k |
+      "  \($k)\t\(.value.kind)\t\(.value.path)\t\(($sz[$k] // 0) / 1048576 | floor) MiB\t\(if ($moving | contains(" " + $k + " ")) then "moves" else "stays (--without-data)" end)"' \
+      <<<"$entries" | column -t -s $'\t'
+    echo "  ${#backups[@]} of them backed up on $from first"
+    echo "  $svc is down on $from from now until $to runs the new configuration"
+  fi
+  if [ "$yes" = 0 ]; then
+    local answer
+    read -rp "go ahead? [y/N] " answer </dev/tty
+    [ "$answer" = y ] || die "nothing done"
+  fi
+
+  # Undone on any failure from here on, last done first.
+  move_undo=()
+  move_done=0
+  trap 'if [ "$move_done" = 0 ]; then service_move_undo; fi; rm -rf "$tmp"' EXIT
+
+  # --- 2. service.nix
+  cp "$file" "$tmp/service.nix.orig"
+  move_undo+=("cp '$tmp/service.nix.orig' '$file'")
+  # host names are directory names; only a dot needs escaping
+  sed -i "s/\"${from//./\\.}\"/\"$to\"/g" "$file"
+  local expected got
+  expected="$(jq -S --arg f "$from" --arg t "$to" '
+    def swap: map(if . == $f then $t else . end);
+    .hosts |= swap | .roles |= map_values(.hosts |= swap)' <<<"$service")"
+  got="$(fleet_json services | jq -S --arg s "$svc" '.[$s]')"
+  if [ "$expected" != "$got" ]; then
+    diff <(echo "$expected") <(echo "$got") >&2 || true
+    die "$file: replacing \"$from\" did more (or less) than move the service; edit it by hand"
+  fi
+  echo "$file: $from -> $to"
+
+  if [ "${#names[@]}" -gt 0 ]; then
+    # --- 3. the state
+    as_root "$from" fleet-state stop "${names[@]}"
+    move_undo+=("as_root '$from' fleet-state start ${names[*]}")
+    if [ "${#backups[@]}" -gt 0 ]; then
+      as_root "$from" fleet-state backup "${backups[@]}"
+    fi
+    local name kind
+    for name in "${moving[@]}"; do
+      kind="$(jq -r --arg n "$name" '.[$n].kind' <<<"$entries")"
+      as_root "$from" fleet-state send "$name" | as_root "$to" fleet-state receive "$name" "$kind"
+      # only what this move made is dropped again (a receive that fails
+      # removes its own leftovers, and never touches what was there)
+      move_undo+=("as_root '$to' fleet-state drop '$name' '$kind'")
+    done
+    as_root "$from" fleet-state freeze "${names[@]}"
+    move_undo+=("as_root '$from' fleet-state thaw ${names[*]}")
+  fi
+
+  # --- 4. secrets
+  move_done=1
+  if ! (secrets_sync); then
+    echo "fleetl: the stores could not be re-keyed; run fleetl secrets sync before deploying" >&2
+  fi
+
+  cat <<EOF
+
+$svc moved from $from to $to in the repository; its state is on $to.
+Next:
+  git diff                     review, then commit
+  deploy $to                   it runs $svc on the state it received
+  deploy $from                  the service goes; its frozen copy stays
+EOF
+  if [ "${#names[@]}" -gt 0 ]; then
+    echo "  fleetl state drop $from <entry> <kind>   once $to runs well, for each of:"
+    jq -r 'to_entries[] | "    \(.key) \(.value.kind)"' <<<"$entries"
+  fi
+}
+
+service_move_undo() {
+  local i
+  echo "fleetl: undoing the move" >&2
+  for ((i = ${#move_undo[@]} - 1; i >= 0; i--)); do
+    eval "${move_undo[$i]}" || echo "fleetl: could not undo: ${move_undo[$i]}" >&2
+  done
+}
+
 # fleet-state on a host, as root (see `fleet-state help` there for the
 # details).
 state_cmd() {
@@ -730,13 +905,14 @@ case "${1:-}" in
     ;;
   state)
     case "${2:-}" in
-      list | size | stop | start | snapshots | backup | restore | rollback | discard) state_cmd "${@:2}" ;;
+      list | size | stop | start | snapshots | backup | restore | rollback | discard | thaw | drop) state_cmd "${@:2}" ;;
       *) usage ;;
     esac
     ;;
   service)
     case "${2:-}" in
       show) show services "${3:?usage: fleetl service show <name>}" ;;
+      move) shift 2; service_move "$@" ;;
       *) usage ;;
     esac
     ;;
