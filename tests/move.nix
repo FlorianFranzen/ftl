@@ -154,6 +154,7 @@ let
         "eval --json .#nixosConfigurations.\"src\".config.fleet.state --apply "*) cat ${state "src"} ;;
         "eval --json .#nixosConfigurations.\"dst\".config.fleet.state --apply "*) cat ${state "dst"} ;;
         "eval --json .#nixosConfigurations.\"src\".config.fleet.backup.enable") echo true ;;
+        "eval --json .#nixosConfigurations.\"src\".config.fleet.storage.tool.enable") echo true ;;
         "eval --json .#nixosConfigurations.\"dst\".config.fleet.backup.enable") echo false ;;
         *) echo "stub nix: no $*" >&2; exit 1 ;;
       esac
@@ -274,6 +275,8 @@ pkgs.testers.runNixOSTest {
     src.succeed("head -c 1M /dev/urandom > /var/lib/web/blob && chown web:web /var/lib/web/blob")
     src.succeed("setfattr -n user.tag -v moved /var/lib/web/blob")
     src.succeed("echo media > /srv/web-media/film")
+    src.succeed("chmod 0750 /var/lib/web")
+    src.succeed("chown 991:991 /var/lib/api && chmod 0710 /var/lib/api")
     src.succeed("fleet-state init")
     dst.succeed("zpool create -O mountpoint=none tank /dev/vdb")
     blob = src.succeed("sha256sum < /var/lib/web/blob")
@@ -341,10 +344,14 @@ pkgs.testers.runNixOSTest {
         src.fail("touch /var/lib/api/y")
         dst.succeed("zfs list tank/apps/api")
         dst.succeed("mkdir -p /mnt/api && mount -t zfs tank/apps/api /mnt/api")
-        dst.succeed("grep -qx api-data /mnt/api/marker && umount /mnt/api")
+        dst.succeed("grep -qx api-data /mnt/api/marker")
+        # the top directory as it was (rustic does not keep it; the backup's tag does)
+        assert dst.succeed("stat -c %u:%a /mnt/api").strip() == "991:710"
+        dst.succeed("umount /mnt/api")
         # the credentials did not stay, nor a cache of src's repository
         dst.fail("ls -d /run/fleet-state.??????")
-        dst.fail("grep -rqs 'PRIVATE KEY' /run /root /var/cache /tmp")
+        dst.fail("grep -rqs -e 'PRIVATE KEY' -e 'backup-key' /run /root /var/cache /tmp")
+        src.fail("ls -d /run/fleet-state.??????")
         dst.fail("test -e /root/.cache/rustic")
         # it came from the box, as src's last backup of it
         box.succeed("test -d /srv/backup/state/snapshots")
@@ -354,6 +361,7 @@ pkgs.testers.runNixOSTest {
         dst.succeed("systemctl is-active web.service")
         assert dst.succeed("sha256sum < /var/lib/web/blob") == blob
         assert dst.succeed("stat -c %u:%g /var/lib/web/blob").strip() == "991:991"
+        assert dst.succeed("stat -c %u:%a /var/lib/web").strip() == "991:750"
         assert dst.succeed("getfattr --only-values -n user.tag /var/lib/web/blob").strip() == "moved"
         dst.succeed("grep -qx media /srv/web-media/film")
         # src's runs and dst's first one
@@ -363,14 +371,13 @@ pkgs.testers.runNixOSTest {
         dst.succeed("grep -qx api-data /var/lib/api/marker")
 
     with subtest("deployed, the source lets go; the frozen copy is dropped"):
-        # still declared, but frozen: dropped before the deploy, its mount blocked
-        fleetl("state drop src api state")
-        src.fail("mountpoint -q /var/lib/api")
-        src.fail("systemctl start var-lib-api.mount")
+        # not before the deploy: a reboot meanwhile would bring it back empty
+        fleetl_fails("state drop src api state")
         src.succeed("/run/current-system/specialisation/moved/bin/switch-to-configuration test")
         src.fail("mountpoint -q /var/lib/web")
         fleetl("state drop src web state")
         fleetl("state drop src web-media data")
+        fleetl("state drop src api state")
         src.succeed("mkdir -p /mnt/top && mount -o subvolid=5 /dev/vdb /mnt/top")
         src.succeed("test ! -e /mnt/top/@apps/web && test ! -e /mnt/top/@data/web-media && test ! -e /mnt/top/@apps/api")
         src.succeed("umount /mnt/top")

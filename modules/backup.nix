@@ -174,6 +174,10 @@ in
         } (fleet.backup.repositories)";
       }
       {
+        assertion = !(cfg.credentialFiles ? password);
+        message = "fleet.backup.credentialFiles: `password` is passwordFile's name";
+      }
+      {
         assertion = config.fleet.storage.tool.enable;
         message = "fleet.backup needs fleet-state (fleet.storage.tool.enable)";
       }
@@ -191,6 +195,8 @@ in
     environment.etc = {
       "fleet-state/backup.json".text = builtins.toJSON {
         inherit kinds;
+        # the repository tables, for a restore on another host (fleet-state access)
+        repositories = lib.genAttrs kinds (kind: cfg.repositories.${kind});
         metrics = cfg.metrics.textfileDir;
         credentials = {
           password = cfg.passwordFile;

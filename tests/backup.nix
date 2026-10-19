@@ -152,7 +152,10 @@ pkgs.testers.runNixOSTest {
         s = snaps[0]
         assert s["paths"] == ["/var/lib/mail"], s
         assert s["hostname"] == "alpha", s
-        assert sorted(s["tags"]) == ["fleet-entry:mail", "fleet-service:mail"], s
+        tags = sorted(t for t in s["tags"] if not t.startswith("fleet-root:"))
+        assert tags == ["fleet-entry:mail", "fleet-service:mail"], s["tags"]
+        # the top directory's owner and mode, which rustic does not keep
+        assert [t for t in s["tags"] if t.startswith("fleet-root:990:990:")], s["tags"]
         assert snapshots("library") == []
         metrics = machine.succeed("cat /var/lib/metrics/fleet-backup.prom")
         assert "fleet_backup_last_success_timestamp_seconds " in metrics, metrics
@@ -281,6 +284,43 @@ pkgs.testers.runNixOSTest {
         machine.fail("test -e /var/lib/outer/stray")
         machine.succeed("mountpoint -q /var/lib/outer/media && grep -qx kept /var/lib/outer/media/big")
         machine.succeed("systemctl is-active outer.service dep.service outer.timer")
+
+    with subtest("a stop twice, or two entries stopped together, start as they were"):
+        machine.succeed("fleet-state stop outer && fleet-state stop outer")
+        machine.succeed("fleet-state start outer")
+        machine.succeed("systemctl is-active outer.service dep.service outer.timer")
+        machine.succeed("fleet-state stop outer mail")
+        machine.succeed("fleet-state start outer")
+        machine.succeed("systemctl is-active outer.service dep.service")
+        machine.fail("systemctl start mail.service")  # still stopped, still blocked
+        machine.succeed("fleet-state start mail")
+        machine.succeed("systemctl is-active mail.service")
+
+    with subtest("a restore keeps the owner and mode of the entry's top directory"):
+        machine.succeed("chmod 0710 /var/lib/mail")
+        machine.succeed("fleet-state backup mail")
+        machine.succeed("chmod 0755 /var/lib/mail && chown root:root /var/lib/mail")
+        machine.succeed("fleet-state restore mail --no-start")
+        assert machine.succeed("stat -c %u:%a /var/lib/mail").strip() == "990:710"
+        machine.succeed("fleet-state start mail")
+        for aside in asides("mail"):
+            machine.succeed(f"fleet-state discard {aside}")
+
+    with subtest("discard takes nothing but a copy kept aside"):
+        stem = "tank" if zfs else "@apps"
+        machine.fail(f"fleet-state discard {'tank/apps' if zfs else '@apps'}/mail.aside-20260101T000000/../../apps/echo")
+        machine.fail("fleet-state discard " + ("tank/apps/mail" if zfs else "@apps/mail"))
+
+    with subtest("an entry with something below it is not sent, and not destroyed"):
+        if zfs:
+            machine.succeed("zfs create -o mountpoint=legacy tank/apps/echo/child")
+        else:
+            machine.succeed("systemctl start var-lib-echo.mount && btrfs subvolume create /var/lib/echo/child")
+        machine.fail("fleet-state send echo > /dev/null")
+        if zfs:
+            machine.succeed("zfs destroy tank/apps/echo/child")
+        else:
+            machine.succeed("btrfs subvolume delete /var/lib/echo/child")
 
     with subtest("stop and start: triggers, what needs the units, masks"):
         machine.succeed("fleet-state stop outer")

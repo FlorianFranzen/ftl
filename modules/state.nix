@@ -40,8 +40,8 @@
 # and `fleetl service move` drive it from the admin's machine.  It reads
 # /etc/fleet-state/state.json, written here.  A host that has no entries yet
 # but should receive one (a service moving to it) needs
-# `fleet.storage.tool.enable`, which is on whenever there are entries or a
-# ZFS pool.
+# `fleet.storage.tool.enable`, which is on whenever there are entries, a ZFS
+# pool or backups.
 {
   config,
   lib,
@@ -122,7 +122,7 @@ let
       lib.mapAttrsToList (_: entry: ''
         dataset=${lib.escapeShellArg entry.location}
         if ! zfs list -H -o name "$dataset" >/dev/null 2>&1; then
-          zfs create -o mountpoint=legacy "$dataset"
+          zfs create -o mountpoint=legacy -o acltype=posixacl -o xattr=sa "$dataset"
         fi
         ${zfsSet ''"$dataset"'' (
           { "com.sun:auto-snapshot" = lib.boolToString entry.snapshots; } // entry.zfs.properties
@@ -327,17 +327,21 @@ in
       # fleet-state blocks an entry's units with drop-ins in /run while it is
       # stopped or frozen; a configuration without the entry lifts them
       system.activationScripts.fleet-state-blocks = lib.stringAfter [ "etc" ] ''
-        for record in /run/fleet-state/*.blocked; do
-          [ -e "$record" ] || continue
-          name="$(basename "$record" .blocked)"
-          if ! ${pkgs.jq}/bin/jq -e --arg n "$name" '.entries | has($n)' /etc/fleet-state/state.json >/dev/null 2>&1; then
-            while IFS= read -r unit; do
-              rm -f "/run/systemd/system/$unit.d/fleet-state-$name.conf"
-              rmdir "/run/systemd/system/$unit.d" 2>/dev/null || true
-            done <"$record"
-            rm -f "$record" "/run/fleet-state/$name.stopped"
-          fi
-        done
+        (
+          exec 8>/run/fleet-state.swap.lock
+          ${pkgs.util-linux}/bin/flock 8
+          for record in /run/fleet-state/*.blocked; do
+            [ -e "$record" ] || continue
+            name="$(basename "$record" .blocked)"
+            if ! ${pkgs.jq}/bin/jq -e --arg n "$name" '.entries | has($n)' /etc/fleet-state/state.json >/dev/null 2>&1; then
+              while IFS= read -r unit; do
+                rm -f "/run/systemd/system/$unit.d/fleet-state-$name.conf"
+                rmdir "/run/systemd/system/$unit.d" 2>/dev/null || true
+              done <"$record"
+              rm -f "$record" "/run/fleet-state/$name.stopped" "/run/fleet-state/$name.boot"
+            fi
+          done
+        )
       '';
     })
     (lib.mkIf (entries != { }) {
@@ -380,7 +384,12 @@ in
               ]
               ++ (if zfs then [ zfsPackage ] else [ pkgs.btrfs-progs ]);
 
-              script = if zfs then zfsScript else btrfsScript;
+              # not while fleet-state swaps a location (it would find it missing)
+              script = ''
+                exec 8>/run/fleet-state.swap.lock
+                flock 8
+              ''
+              + (if zfs then zfsScript else btrfsScript);
             }
             // (
               if zfs then

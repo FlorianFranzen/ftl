@@ -39,6 +39,10 @@
 #   fleetl state thaw <host> <entry>...  undo the freeze a move left
 #   fleetl state drop <host> <entry> <kind>
 #                                       destroy what a move left behind
+#   fleetl state copy <from> <to> <entry> <kind>
+#                                       an entry streamed to another host, swapped in
+#                                       there (what a move left behind with
+#                                       --without-data, say)
 #   fleetl fleet generate [--force] [<generator>...]
 #                                       run the fleet's generators whose files are missing
 #   fleetl fleet show                   the fleet: hosts, services, users, keys, stores
@@ -762,6 +766,10 @@ service_move() {
     [ "$answer" = y ] || die "nothing done"
   fi
 
+  # one fleetl changing this repository's fleet at a time
+  exec 7>"$(git rev-parse --git-dir)/fleetl.lock"
+  flock -n 7 || die "another fleetl is moving a service of this repository"
+
   # Undone on any failure from here on, last done first.
   move_undo=()
   move_done=0
@@ -782,29 +790,47 @@ service_move() {
     die "$file: replacing \"$from\" did more (or less) than move the service; edit it by hand"
   fi
   echo "$file: $from -> $to"
+  # what the move leaves on <from> is dropped with fleet-state, once <from>
+  # is deployed without the service: it has to have it then
+  if [ "${#names[@]}" -gt 0 ] &&
+    [ "$(nix eval --json ".#nixosConfigurations.\"$from\".config.fleet.storage.tool.enable" 2>/dev/null)" = false ]; then
+    die "$from would have no fleet-state once deployed (no entries left, no backups, no ZFS), and its frozen copies could not be dropped: set fleet.storage.tool.enable there first"
+  fi
 
   if [ "${#names[@]}" -gt 0 ]; then
-    # --- 3. the state
-    as_root "$from" fleet-state stop "${names[@]}"
+    # --- 3. the state.  Each undo is in place before its step: a step that
+    # fails halfway is undone as well (they are all safe to repeat).
     move_undo+=("as_root '$from' fleet-state start ${names[*]}")
+    as_root "$from" fleet-state stop "${names[@]}" </dev/null
+    local -A snapshot=()
     if [ "${#backups[@]}" -gt 0 ]; then
-      as_root "$from" fleet-state backup "${backups[@]}"
+      local ids line
+      ids="$(as_root "$from" fleet-state backup "${backups[@]}" </dev/null)"
+      while IFS=$'\t' read -r name line; do
+        if [ -n "$name" ]; then snapshot[$name]="$line"; fi
+      done <<<"$ids"
     fi
     local name kind
     for name in "${moving[@]}"; do
       kind="$(jq -r --arg n "$name" '.[$n].kind' <<<"$entries")"
-      if [ "$via" = backup ] && [[ " ${backups[*]} " == *" $name "* ]]; then
-        as_root "$from" fleet-state access "$kind" |
-          as_root "$to" fleet-state receive "$name" "$kind" --from-backup "$from"
+      # what reaches the target stays beside it until it arrived whole
+      move_undo+=("as_root '$to' fleet-state abort '$name' '$kind' </dev/null")
+      if [ "$via" = backup ] && [ -n "${snapshot[$name]:-}" ]; then
+        as_root "$from" fleet-state access "$kind" </dev/null |
+          as_root "$to" fleet-state receive "$name" "$kind" --from-backup "$from" --snapshot "${snapshot[$name]}"
       else
-        as_root "$from" fleet-state send "$name" | as_root "$to" fleet-state receive "$name" "$kind"
+        as_root "$from" fleet-state send "$name" </dev/null | as_root "$to" fleet-state receive "$name" "$kind"
       fi
-      # only what this move made is dropped again (a receive that fails
-      # removes its own leftovers, and never touches what was there)
-      move_undo+=("as_root '$to' fleet-state drop '$name' '$kind'")
+      # both ends succeeded (pipefail): only now is it the entry's, and only
+      # what this move placed is dropped again
+      as_root "$to" fleet-state place "$name" "$kind" </dev/null
+      move_undo+=("as_root '$to' fleet-state drop '$name' '$kind' </dev/null")
     done
-    as_root "$from" fleet-state freeze "${names[@]}"
-    move_undo+=("as_root '$from' fleet-state thaw ${names[*]}")
+    if [ "${#moving[@]}" -gt 0 ]; then
+      move_undo+=("as_root '$from' fleet-state thaw ${moving[*]} </dev/null")
+      # what was sent, and only if it stayed stopped all along
+      as_root "$from" fleet-state freeze --stopped "${moving[@]}" </dev/null
+    fi
   fi
 
   # --- 4. secrets
@@ -822,12 +848,17 @@ Next:
   deploy $from                  the service goes; its frozen copy stays
 EOF
   if [ "${#names[@]}" -gt 0 ]; then
-    if [ "$(nix eval --json ".#nixosConfigurations.\"$from\".config.fleet.storage.tool.enable" 2>/dev/null)" = false ]; then
-      echo "  ! $from has no fleet-state once deployed (no entries left, no backups, no ZFS):"
-      echo "    drop the frozen copies before deploying $from, or set fleet.storage.tool.enable there"
+    if [ "${#moving[@]}" -gt 0 ]; then
+      echo "  fleetl state drop $from <entry> <kind>   once $to runs well, for each of:"
+      jq -r --arg m " ${moving[*]} " 'to_entries[] | .key as $k | select($m | contains(" " + $k + " ")) | "    \($k) \(.value.kind)"' <<<"$entries"
     fi
-    echo "  fleetl state drop $from <entry> <kind>   once $to runs well, for each of:"
-    jq -r 'to_entries[] | "    \(.key) \(.value.kind)"' <<<"$entries"
+    local staying
+    staying="$(jq -r --arg m " ${moving[*]} " 'to_entries[] | .key as $k | select($m | contains(" " + $k + " ") | not) | "    \($k) \(.value.kind)"' <<<"$entries")"
+    if [ -n "$staying" ]; then
+      echo "  these stayed on $from (--without-data); copy them when it suits, before dropping them:"
+      echo "    fleetl state copy $from $to <entry> <kind>"
+      echo "$staying"
+    fi
   fi
 }
 
@@ -837,6 +868,20 @@ service_move_undo() {
   for ((i = ${#move_undo[@]} - 1; i >= 0; i--)); do
     eval "${move_undo[$i]}" || echo "fleetl: could not undo: ${move_undo[$i]}" >&2
   done
+}
+
+# An entry from one host to another (what a move left behind with
+# --without-data, say): streamed beside it, then placed, swapped in if the
+# target uses the entry already.
+state_copy() {
+  in_repo
+  local usage="usage: fleetl state copy <from> <to> <entry> <kind>"
+  local from="${1:?$usage}" to="${2:?$usage}" name="${3:?$usage}" kind="${4:?$usage}"
+  as_root "$from" fleet-state send "$name" "$kind" </dev/null | as_root "$to" fleet-state receive "$name" "$kind" || {
+    as_root "$to" fleet-state abort "$name" "$kind" </dev/null || true
+    die "$name: not copied"
+  }
+  as_root "$to" fleet-state place "$name" "$kind" --replace </dev/null
 }
 
 # fleet-state on a host, as root (see `fleet-state help` there for the
@@ -934,6 +979,7 @@ case "${1:-}" in
   state)
     case "${2:-}" in
       list | size | stop | start | snapshots | backup | restore | rollback | discard | thaw | drop) state_cmd "${@:2}" ;;
+      copy) shift 2; state_copy "$@" ;;
       *) usage ;;
     esac
     ;;

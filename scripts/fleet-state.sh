@@ -44,9 +44,8 @@
 #                                          behind cannot change any more (until a reboot
 #                                          lifts the block, the read-only stays)
 #   fleet-state thaw <entry>...            undo freeze
-#   fleet-state drop <entry> <kind>        destroy what a move left behind: an entry this
-#                                          host no longer declares, or one it still
-#                                          declares but froze
+#   fleet-state drop <entry> <kind>        destroy what a move left behind of an entry
+#                                          this host no longer declares
 #
 # What the host keeps is described by /etc/fleet-state/state.json (written by
 # the state module), its backups by /etc/fleet-state/backup.json and the rustic
@@ -71,11 +70,11 @@ usage() {
 }
 
 die() {
-  echo "fleet-state: $*" >&2
+  echo "fleet-state: $*" >&2 || true
   exit 1
 }
 
-log() { echo "fleet-state: $*" >&2; }
+log() { echo "fleet-state: $*" >&2 || true; }
 
 case "${1:-}" in
   -h | --help | help) usage 0 ;;
@@ -104,7 +103,7 @@ entries_where() { # <jq condition on an entry>
   jq -r ".entries | to_entries[] | select(.value | $1) | .key" "$state_json"
 }
 
-# --- scratch space and cleanup -------------------------------------------------
+# --- scratch space, signals and cleanup ----------------------------------------
 
 # Everything temporary (snapshots, their mount points, the btrfs top level)
 # is undone on any exit, a failure included, last made first undone.  A
@@ -126,10 +125,18 @@ cleanup() {
   rm -rf --one-file-system "$scratch"
 }
 trap cleanup EXIT
-# a signal (a reader gone, ^C) ends the run through the same cleanup
-trap 'exit 129' HUP PIPE
-trap 'exit 130' INT
-trap 'exit 143' TERM
+# The admin's connection going away must not end a run halfway: a write to
+# it fails instead of killing (log does not care), and inside a swap HUP,
+# INT and TERM wait until the entry is whole again.  Elsewhere they end the
+# run through the cleanup.
+trap '' PIPE
+uncritical() {
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+}
+critical() { trap '' HUP INT TERM; }
+uncritical
 
 # Never call it as a condition (`scoped ... || ...`, `if scoped`): bash turns
 # errexit off for everything run in one, the subshell included, and a failed
@@ -152,6 +159,17 @@ lock() {
   exec 9>/run/fleet-state.lock
   flock -n 9 || { log "waiting for another fleet-state"; flock 9; }
 }
+
+# The swaps also against the state module's creation of missing locations
+# (at boot and on every switch), which would otherwise make an empty one in
+# the moment a location is renamed.
+# Only around renames: the module's creation runs as a dependency of the
+# mounts, which a swap starts.
+swap_lock() {
+  exec 8>/run/fleet-state.swap.lock
+  flock 8
+}
+swap_unlock() { exec 8>&-; }
 
 # btrfs: the top level of the filesystem, where @apps and @data live.
 top=""
@@ -178,12 +196,34 @@ location_of() { # <entry> <kind>
   fi
 }
 
+# A declared entry's location, or by kind an entry this host does not (or no
+# longer) declare.
+entry_location() { # <entry> [<kind>]
+  if has_entry "$1"; then
+    field "$1" location
+  else
+    [ -n "${2:-}" ] || die "$1 is not declared on $host; say its kind (state or data)"
+    location_of "$1" "$2"
+  fi
+}
+
 location_exists() { # <location>
   if [ "$backend" = zfs ]; then
     zfs list -H -o name "$1" >/dev/null 2>&1
   else
     mount_top
     btrfs subvolume show "$top/$1" >/dev/null 2>&1
+  fi
+}
+
+# Datasets below a dataset, subvolumes below a subvolume: not part of its
+# snapshots, so neither sent nor backed up, and never destroyed with it.
+has_children() { # <location>
+  if [ "$backend" = zfs ]; then
+    [ "$(zfs list -H -o name -r -d 1 -t filesystem,volume "$1" | wc -l)" -gt 1 ]
+  else
+    mount_top
+    [ -n "$(btrfs subvolume list -o "$top/$1")" ]
   fi
 }
 
@@ -212,15 +252,23 @@ asides_of() { # <location>
   fi
 }
 
-# A new, empty dataset (mountpoint=legacy, as the state module makes them)
-# or subvolume.
-create_location() { # <location>
+# A new, empty dataset (mountpoint=legacy, POSIX ACLs and xattrs as the state
+# module makes them, and the entry's properties when it is declared) or
+# subvolume.
+create_location() { # <location> [<entry>]
   local parent="${1%/*}"
   if [ "$backend" = zfs ]; then
     if ! zfs list -H -o name "$parent" >/dev/null 2>&1; then
       zfs create -o canmount=off -o mountpoint=none "$parent"
     fi
-    zfs create -o mountpoint=legacy "$1"
+    local -a props=(-o mountpoint=legacy -o acltype=posixacl -o xattr=sa)
+    local k v
+    if [ -n "${2:-}" ] && has_entry "$2"; then
+      while IFS=$'\t' read -r k v; do
+        if [ -n "$k" ]; then props+=(-o "$k=$v"); fi
+      done < <(jq -r --arg n "$2" '.entries[$n].zfsProperties // {} | to_entries[] | [.key, .value] | @tsv' "$state_json")
+    fi
+    zfs create "${props[@]}" "$1"
   else
     mount_top
     if ! btrfs subvolume show "$top/$parent" >/dev/null 2>&1; then
@@ -258,15 +306,21 @@ rename_location() { # <from> <to>
     zfs rename "$1" "$2"
   else
     mount_top
-    mv -T "$top/$1" "$top/$2"
+    mv -T --no-copy "$top/$1" "$top/$2"
   fi
 }
 
-# Destroys a dataset or subvolume with its snapshots; only for what fleet-state
-# made itself or what it was asked to destroy by name.
+# Destroys a dataset or subvolume and its snapshots, never what is below it;
+# only for what fleet-state made itself or what it was asked to destroy by
+# name.
 destroy_location() { # <location>
+  ! has_children "$1" || die "$1 has datasets or subvolumes below it; not destroying it"
   if [ "$backend" = zfs ]; then
-    zfs destroy -r "$1"
+    local snap
+    while IFS= read -r snap; do
+      if [ -n "$snap" ]; then zfs destroy "$snap"; fi
+    done < <(zfs list -H -t snapshot -o name -d 1 "$1")
+    zfs destroy "$1"
   else
     mount_top
     btrfs property set -ts "$top/$1" ro false
@@ -358,13 +412,33 @@ active_units() {
     --type=service,socket,timer,path,mount,automount | awk '{ print $1 }' | sort
 }
 
-# Blocked units refuse to start (an assertion in a drop-in) while the
-# entry's record of them exists; unblock removes both.
+# Units and whatever needs them, all the way up (sockets, timers, paths,
+# services, mounts; not targets).
+needing() { # <unit>...
+  local u
+  for u in "$@"; do
+    echo "$u"
+    systemctl list-dependencies --reverse --all --plain --no-legend "$u" 2>/dev/null | awk '{ print $1 }'
+  done | grep -E '\.(service|socket|timer|path|mount|automount)$' | sort -u || true
+}
+
+# Blocked units refuse to start (an assertion in a drop-in) while the entry's
+# record of them exists; unblock removes both.  Blocking again adds to what
+# is blocked.  The boot is recorded with it: a block does not outlive one.
 block() { # <entry> <unit>...
   local name="$1" u
   shift
-  printf '%s\n' "$@" >"$records/$name.blocked"
-  for u in "$@"; do
+  local -a all=("$@")
+  mkdir -p "$records"
+  if [ -f "$records/$name.blocked" ]; then
+    mapfile -t -O "${#all[@]}" all <"$records/$name.blocked"
+  fi
+  mapfile -t all < <(printf '%s\n' "${all[@]}" | awk 'NF && !seen[$0]++')
+  printf '%s\n' "${all[@]}" >"$records/$name.blocked"
+  if [ ! -f "$records/$name.boot" ]; then
+    cat /proc/sys/kernel/random/boot_id >"$records/$name.boot"
+  fi
+  for u in "${all[@]}"; do
     mkdir -p "$dropins/$u.d"
     printf '[Unit]\n# fleet-state stop %s (fleet-state start %s)\nAssertPathExists=!%s\n' \
       "$name" "$name" "$records/$name.blocked" >"$dropins/$u.d/fleet-state-$name.conf"
@@ -378,7 +452,7 @@ unblock() { # <entry>...
   for name in "$@"; do
     [ -f "$records/$name.blocked" ] || continue
     mapfile -t units <"$records/$name.blocked"
-    rm -f "$records/$name.blocked"
+    rm -f "$records/$name.blocked" "$records/$name.boot"
     for u in "${units[@]}"; do
       rm -f "$dropins/$u.d/fleet-state-$name.conf"
       rmdir "$dropins/$u.d" 2>/dev/null || true
@@ -387,31 +461,51 @@ unblock() { # <entry>...
   systemctl daemon-reload
 }
 
+# Stopped (or frozen) since this boot, by fleet-state, and still so?
+still_stopped() { # <entry>
+  [ -f "$records/$1.blocked" ] && [ -f "$records/$1.boot" ] &&
+    [ "$(cat "$records/$1.boot")" = "$(cat /proc/sys/kernel/random/boot_id)" ] || return 1
+  local u
+  while IFS= read -r u; do
+    if [ -n "$u" ] && systemctl is-active --quiet "$u"; then return 1; fi
+  done < <(running_units_of "$1")
+}
+
 # quiesce [--unmount] <entry>...: nothing uses the entries any more.  Their
-# units and triggers are blocked until resume (so that no dependency, timer
-# or activation starts them meanwhile), the triggers stopped, then the units
-# running by then; with --unmount the entries are unmounted too.  What
-# stopped on the way, whatever needed it included, is recorded for resume.
+# units and triggers (and with --unmount their mounts) are blocked until
+# resume, so that no dependency, timer or activation starts them meanwhile;
+# the triggers are stopped, then the units running by then, then with
+# --unmount the mounts (nested entries go along).  Of the units these are
+# and of what needs them, whatever stopped is recorded for resume, added to
+# what an earlier quiesce recorded.
 quiesce() {
-  local unmount=0 name before
+  local unmount=0 name before scope
   if [ "$1" = --unmount ]; then
     unmount=1
     shift
   fi
   local -a units=() triggers=() running=() mounts=()
-  before="$(active_units)"
-  mkdir -p "$records"
-  for name in "$@"; do
-    mapfile -t triggers < <(triggers_of "$name")
-    mapfile -t units < <(declared_units "$name")
-    block "$name" "${units[@]}" "${triggers[@]}"
-  done
   for name in "$@"; do
     mapfile -t -O "${#triggers[@]}" triggers < <(triggers_of "$name")
+    mapfile -t -O "${#running[@]}" running < <(running_units_of "$name")
+    if [ "$unmount" = 1 ]; then
+      mounts+=("$(mount_unit "$(field "$name" path)")")
+    fi
+  done
+  scope="$(needing "${triggers[@]}" "${running[@]}" "${mounts[@]}")"
+  before="$(comm -12 <(active_units) <(echo "$scope"))"
+  for name in "$@"; do
+    mapfile -t units < <(declared_units "$name"; triggers_of "$name")
+    if [ "$unmount" = 1 ]; then
+      units+=("$(mount_unit "$(field "$name" path)")")
+    fi
+    block "$name" "${units[@]}"
   done
   if [ "${#triggers[@]}" -gt 0 ]; then
     systemctl stop "${triggers[@]}"
   fi
+  # the instances running now that their sockets are stopped
+  running=()
   for name in "$@"; do
     mapfile -t -O "${#running[@]}" running < <(running_units_of "$name")
   done
@@ -419,10 +513,7 @@ quiesce() {
     log "stopping ${running[*]}"
     systemctl stop "${running[@]}"
   fi
-  if [ "$unmount" = 1 ]; then
-    for name in "$@"; do
-      mounts+=("$(mount_unit "$(field "$name" path)")")
-    done
+  if [ "${#mounts[@]}" -gt 0 ]; then
     if ! systemctl stop "${mounts[@]}"; then
       record_stopped "$before" "$@"
       resume "$@"
@@ -439,9 +530,9 @@ quiesce() {
   record_stopped "$before" "$@"
 }
 
-# What was active before and is not now and can be started again: units
-# with a unit file (not a mount someone made by hand meanwhile), but not the
-# instances an Accept=yes socket spawns (they come with a connection).
+# Of what was active before, what is not now and can be started again: units
+# with a unit file, but not the instances an Accept=yes socket spawns (they
+# come with a connection).  Added to each entry's record.
 record_stopped() { # <active before> <entry>...
   local before="$1" name u
   shift
@@ -464,15 +555,18 @@ record_stopped() { # <active before> <entry>...
     fi
   done < <(comm -23 <(echo "$before") <(active_units))
   for name in "$@"; do
-    printf '%s\n' "${stopped[@]}" >"$records/$name.stopped"
+    { printf '%s\n' "${stopped[@]}"; cat "$records/$name.stopped" 2>/dev/null || true; } |
+      awk 'NF && !seen[$0]++' >"$records/$name.stopped.new"
+    mv "$records/$name.stopped.new" "$records/$name.stopped"
   done
 }
 
 # resume [--mounts-only] <entry>...: what quiesce stopped, started again, and
 # the blocks lifted; with --mounts-only just the mounts, the rest stays
-# stopped and blocked for a later resume.
+# stopped and blocked for a later resume.  Units that other entries still
+# block are left to their resume.
 resume() {
-  local only=0 name
+  local only=0 name f
   if [ "$1" = --mounts-only ]; then
     only=1
     shift
@@ -483,15 +577,38 @@ resume() {
       mapfile -t -O "${#units[@]}" units <"$records/$name.stopped"
     fi
   done
-  mapfile -t units < <(printf '%s\n' "${units[@]}" | awk 'NF && !seen[$0]++')
-  if [ "$only" = 1 ]; then
-    mapfile -t units < <(printf '%s\n' "${units[@]}" | grep '\.mount$' || true)
-  else
+  if [ "$only" = 0 ]; then
     unblock "$@"
     for name in "$@"; do
       rm -f "$records/$name.stopped"
     done
+  else
+    # the mounts are let go of now; the rest stays blocked
+    local u
+    for name in "$@"; do
+      if [ -f "$records/$name.blocked" ]; then
+        while IFS= read -r u; do
+          rm -f "$dropins/$u.d/fleet-state-$name.conf"
+          rmdir "$dropins/$u.d" 2>/dev/null || true
+        done < <(grep '\.mount$' "$records/$name.blocked" || true)
+        grep -v '\.mount$' "$records/$name.blocked" >"$records/$name.blocked.new" || true
+        mv "$records/$name.blocked.new" "$records/$name.blocked"
+      fi
+    done
+    systemctl daemon-reload
   fi
+  {
+    printf '%s\n' "${units[@]}" | awk 'NF && !seen[$0]++'
+  } >"$scratch/resume"
+  if [ "$only" = 1 ]; then
+    grep '\.mount$' "$scratch/resume" >"$scratch/resume.new" || true
+    mv "$scratch/resume.new" "$scratch/resume"
+  fi
+  # what other entries still block
+  for f in "$records"/*.blocked; do
+    if [ -f "$f" ]; then cat "$f"; fi
+  done | sort -u >"$scratch/blocked"
+  mapfile -t units < <(grep -vxF -f "$scratch/blocked" "$scratch/resume" || true)
   if [ "${#units[@]}" -gt 0 ]; then
     log "starting ${units[*]}"
     # a few swaps in a row would hit the mounts' start limit
@@ -531,30 +648,36 @@ cmd_start() {
 # --- swapping ------------------------------------------------------------------
 
 # swap_in [--no-start] <entry> <location>: the location becomes the entry, the
-# current one (if any) is kept aside.  Nothing uses the entry meanwhile; if
-# the swap fails halfway, the current one is put back.
+# current one (if any) is kept aside.  Nothing uses the entry meanwhile, and
+# no signal ends the swap halfway; if it fails, the current one is put back
+# and what stopped started again.
+swap_name="" swap_loc="" swap_aside="" swap_done=0 swap_resumed=0
 swap_in() {
   local start=1
   if [ "$1" = --no-start ]; then
     start=0
     shift
   fi
-  local name="$1" new="$2" loc aside=""
-  loc="$(field "$name" location)"
+  local name="$1" new="$2"
   location_exists "$new" || die "no $new"
+  swap_name="$name"
+  swap_loc="$(field "$name" location)"
+  swap_aside="" swap_done=0 swap_resumed=0
 
+  critical
   quiesce --unmount "$name"
-  if location_exists "$loc"; then
-    aside="$(aside_name "$loc")"
-    rename_location "$loc" "$aside"
+  cleanups+=("swap_recover")
+  swap_lock
+  if location_exists "$swap_loc"; then
+    swap_aside="$(aside_name "$swap_loc")"
+    rename_location "$swap_loc" "$swap_aside"
+    if [ "$backend" = zfs ]; then zfs set com.sun:auto-snapshot=false "$swap_aside"; fi
   fi
-  if ! rename_location "$new" "$loc"; then
-    if [ -n "$aside" ]; then rename_location "$aside" "$loc"; fi
-    resume "$name"
-    die "$name: could not swap $new in; the entry is as it was"
-  fi
-  apply_properties "$name" "$loc"
-  log "$name: swapped in${aside:+; what was there is kept aside as $aside}"
+  rename_location "$new" "$swap_loc"
+  apply_properties "$name" "$swap_loc"
+  swap_done=1
+  swap_unlock
+  log "$name: swapped in${swap_aside:+; what was there is kept aside as $swap_aside}"
 
   if [ "$start" = 1 ]; then
     resume "$name"
@@ -562,7 +685,23 @@ swap_in() {
     resume --mounts-only "$name"
     log "$name: its units stay stopped (fleet-state start $name)"
   fi
-  is_mounted "$name" || die "$name: $loc is not mounted at $(field "$name" path) after the swap"
+  swap_resumed=1
+  uncritical
+  is_mounted "$name" || die "$name: $swap_loc is not mounted at $(field "$name" path) after the swap"
+}
+
+# On a failure inside a swap: the entry as it was, running again.
+swap_recover() {
+  if [ "$swap_done" = 0 ] && ! location_exists "$swap_loc" &&
+    [ -n "$swap_aside" ] && location_exists "$swap_aside"; then
+    log "$swap_name: the swap failed; putting $swap_aside back"
+    swap_lock
+    rename_location "$swap_aside" "$swap_loc"
+  fi
+  swap_unlock
+  if [ "$swap_resumed" = 0 ]; then
+    resume "$swap_name"
+  fi
 }
 
 # --- snapshots -----------------------------------------------------------------
@@ -572,9 +711,9 @@ swap_in() {
 # process (or of the `scoped` subshell).  A snapshot left over by an earlier
 # run that died is replaced.
 snapdir=""
-snapshot_take() {
-  local name="$1" tag="$2" loc
-  loc="$(field "$name" location)"
+snapshot_take() { # <entry> <tag> [<location>]
+  local name="$1" tag="$2" loc="${3:-}"
+  [ -n "$loc" ] || loc="$(field "$name" location)"
   if [ "$backend" = zfs ]; then
     zfs list -H -o name "$loc" >/dev/null 2>&1 || die "$name: no dataset $loc"
     if zfs list -H -o name "$loc@$tag" >/dev/null 2>&1; then
@@ -625,25 +764,37 @@ backup_entry() { # <entry>
   if [ -n "$service" ]; then tags="$tags,fleet-service:$service"; fi
   [ -f "$(profile "$kind").toml" ] || die "$name: no repository for kind $kind"
 
+  if has_children "$(field "$name" location)"; then
+    log "$name: warning: the datasets or subvolumes below it are not backed up"
+  fi
   snapshot_take "$name" fleet-backup
+  # rustic keeps no metadata of the directory it backs up as --as-path: its
+  # owner and mode go along as a tag, for the restore
+  tags="$tags,fleet-root:$(stat -c '%u:%g:%a' "$snapdir")"
   log "$name: backing up $path"
-  rustic -P "$(profile "$kind")" backup --no-progress \
-    --host "$host" --label "$name" --tag "$tags" --as-path "$path" "$snapdir"
+  local json id
+  json="$(rustic -P "$(profile "$kind")" backup --no-progress --json \
+    --host "$host" --label "$name" --tag "$tags" --as-path "$path" "$snapdir")"
+  id="$(jq -r '.id // empty' <<<"$json")"
+  [ -n "$id" ] || die "$name: rustic reported no snapshot"
+  log "$name: backed up as ${id:0:8}"
+  # for whoever asked (fleetl service move restores exactly this one)
+  printf '%s\t%s\n' "$name" "$id"
 }
 
 cmd_backup() {
   need_backup
-  local all=0 name
+  local every=0 name
   local -a names=() failed=()
   while [ $# -gt 0 ]; do
     case "$1" in
-      --all) all=1 ;;
+      --all) every=1 ;;
       -*) usage ;;
       *) names+=("$1") ;;
     esac
     shift
   done
-  if [ "$all" = 1 ]; then
+  if [ "$every" = 1 ]; then
     [ "${#names[@]}" = 0 ] || usage
     mapfile -t names < <(entries_where '.backup')
   fi
@@ -660,7 +811,7 @@ cmd_backup() {
     scoped backup_entry "$name"
     [ "$scoped_rc" = 0 ] || failed+=("$name")
   done
-  if [ "$all" = 1 ]; then
+  if [ "$every" = 1 ]; then
     # pruning goes by host, label and path, so a failed entry is no reason
     # to let the others' history grow
     local kind
@@ -733,7 +884,8 @@ cmd_snapshots() {
 find_snapshot() { # <profile> <entry> <host> <id or latest>
   local profile="$1" name="$2" from="$3" want="$4" json
   if [ "$want" = latest ]; then
-    json="$(rustic -P "$profile" snapshots --json --filter-host "$from" --filter-label "$name" --filter-last 1)"
+    # grouped by host and label only: an entry whose path changed is one group
+    json="$(rustic -P "$profile" snapshots --json -g host,label --filter-host "$from" --filter-label "$name" --filter-last 1)"
     jq -r '[.[].snapshots[]] | last | .id // empty' <<<"$json"
   else
     json="$(rustic -P "$profile" snapshots --json --filter-host "$from" --filter-label "$name")"
@@ -743,6 +895,26 @@ find_snapshot() { # <profile> <entry> <host> <id or latest>
       *) die "$name: '$want' names more than one snapshot" ;;
     esac
   fi
+}
+
+# A field of a snapshot: its path, or its root's owner and mode (from the
+# fleet-root tag).
+snapshot_path() { # <profile> <id>
+  rustic -P "$1" snapshots --json | jq -r --arg id "$2" '[.[].snapshots[] | select(.id == $id)][0].paths[0] // empty'
+}
+
+# The restored directory gets the owner and mode the entry's root had.
+restore_root() { # <profile> <id> <directory>
+  local root uid gid mode
+  root="$(rustic -P "$1" snapshots --json |
+    jq -r --arg id "$2" '[.[].snapshots[] | select(.id == $id)][0].tags // [] | map(select(startswith("fleet-root:"))) | .[0] // empty')"
+  if [ -z "$root" ]; then
+    log "warning: the backup does not say who owned its top directory; left root's, 0755"
+    return 0
+  fi
+  IFS=: read -r _ uid gid mode <<<"$root"
+  chown "$uid:$gid" "$3"
+  chmod "$mode" "$3"
 }
 
 cmd_restore() {
@@ -761,9 +933,8 @@ cmd_restore() {
   [ -n "$name" ] || usage
   need_entry "$name"
 
-  local kind path loc p id incoming
+  local kind loc p id incoming
   kind="$(field "$name" kind)"
-  path="$(field "$name" path)"
   loc="$(field "$name" location)"
   p="$(profile "$kind")"
   [ -f "$p.toml" ] || die "$name: no repository for kind $kind"
@@ -777,11 +948,15 @@ cmd_restore() {
     log "$name: removing an incomplete restore ($incoming)"
     destroy_location "$incoming"
   fi
-  create_location "$incoming"
+  create_location "$incoming" "$name"
   cleanups+=("destroy_if_exists '$incoming'")
   open_location "$incoming"
-  log "$name: restoring snapshot ${id:0:8} of $from"
-  rustic -P "$p" restore --no-progress --numeric-id "$id:$path" "$opened"
+  # the snapshot's own path: the entry's may have changed since
+  local spath
+  spath="$(snapshot_path "$p" "$id")"
+  log "$name: restoring snapshot ${id:0:8} of $from ($spath)"
+  rustic -P "$p" restore --no-progress --numeric-id "$id:$spath" "$opened"
+  restore_root "$p" "$id" "$opened"
   close_location "$opened"
 
   if [ "$start" = 1 ]; then
@@ -802,17 +977,35 @@ cmd_rollback() {
     aside="$(asides_of "$loc" | tail -n 1)"
     [ -n "$aside" ] || die "$name: nothing kept aside (fleet-state list)"
   fi
-  [[ $aside == "$loc.aside-"* ]] || die "$aside is not a copy of $name kept aside"
+  if [[ $aside != "$loc.aside-"* ]] || ! is_aside "$aside"; then
+    die "$aside is not a copy of $name kept aside"
+  fi
   log "$name: swapping $aside back in"
   swap_in "$name" "$aside"
+}
+
+# A name fleet-state gave a copy it kept aside, exactly.
+is_aside() { # <location>
+  local stem
+  if [ "$backend" = zfs ]; then stem="$pool/"; else stem="@"; fi
+  [[ $1 =~ ^${stem//./\\.}(apps|data)/[A-Za-z0-9][A-Za-z0-9_-]*\.aside-[0-9]{8}T[0-9]{6}(-[0-9]+)?$ ]]
+}
+
+is_mounted_anywhere() { # <location>
+  if [ "$backend" = zfs ]; then
+    [ -n "$(findmnt -n -l -o TARGET --source "$1" || true)" ]
+  else
+    findmnt -n -l -o FSROOT | grep -qxF "/$1"
+  fi
 }
 
 cmd_discard() {
   [ $# = 1 ] || usage
   local aside="$1"
-  [[ $aside == *.aside-* ]] || die "$aside is not a copy kept aside (fleet-state list)"
+  is_aside "$aside" || die "$aside is not a copy kept aside (fleet-state list)"
   lock
   location_exists "$aside" || die "no $aside"
+  ! is_mounted_anywhere "$aside" || die "$aside is mounted"
   destroy_location "$aside"
   log "$aside destroyed"
 }
@@ -821,29 +1014,36 @@ cmd_discard() {
 
 tar_flags=(--xattrs --xattrs-include='*' --acls --numeric-owner --sparse)
 
+# An entry, declared or (by kind) left behind by a move, as a tar.
 cmd_send() {
-  [ $# = 1 ] || usage
-  local name="$1"
-  need_entry "$name"
+  { [ $# -ge 1 ] && [ $# -le 2 ]; } || usage
+  local name="$1" loc
+  loc="$(entry_location "$1" "${2:-}")"
   [ ! -t 1 ] || die "send writes a tar stream; pipe it somewhere"
   lock
-  snapshot_take "$name" fleet-send
+  location_exists "$loc" || die "no $loc on $host"
+  ! has_children "$loc" || die "$name: $loc has datasets or subvolumes below it, which would not go along"
+  snapshot_take "$name" fleet-send "$loc"
   log "$name: sending $(du -shx "$snapdir" | cut -f1)"
   tar -C "$snapdir" -c "${tar_flags[@]}" -f - .
 }
 
-# The repository's profile and the files it reads (password, key), for a
-# restore elsewhere: the credentials go no further than the pipe.
+# The repository of a kind, for a restore on another host: its settings as
+# data (not a profile, which could run commands there), the host name its
+# backups are recorded under, and the files it reads (password, key).  They
+# pass through the pipe, and the target keeps them only for the restore; it
+# can read and change the repository meanwhile, as this host can.
 cmd_access() {
   [ $# = 1 ] || usage
   local kind="$1" dir name path
   need_backup
-  jq -e --arg k "$kind" '.kinds | index($k)' "$backup_json" >/dev/null || die "no repository for kind $kind"
+  jq -e --arg k "$kind" '.repositories | has($k)' "$backup_json" >/dev/null || die "no repository for kind $kind"
   [ ! -t 1 ] || die "access writes a tar stream with credentials; pipe it to fleet-state receive"
   dir="$scratch/access"
   mkdir -m 700 "$dir" "$dir/files"
-  cat "$(profile "$kind").toml" >"$dir/profile.toml"
+  jq --arg k "$kind" '.repositories[$k] + { "password-file": .credentials.password }' "$backup_json" >"$dir/repository.json"
   jq '.credentials' "$backup_json" >"$dir/credentials.json"
+  echo "$host" >"$dir/host"
   while IFS=$'\t' read -r name path; do
     (umask 077; cat "$path" >"$dir/files/$name")
   done < <(jq -r '.credentials | to_entries[] | [.key, .value] | @tsv' "$backup_json")
@@ -851,31 +1051,56 @@ cmd_access() {
   tar -C "$dir" -c -f - .
 }
 
-# The access on stdin unpacked into a private directory, the profile's
-# credential paths pointed into it; the profile's path (without .toml) in
-# $access_profile.  rustic keeps no cache of the foreign repository.
-access_profile=""
+# The access on stdin unpacked into a private directory and checked (plain
+# files only, no commands or hooks, no credential path left that is not
+# pointed into it), the profile written from it; its path (without .toml) in
+# $access_profile, the source's host name in $access_host.  rustic keeps no
+# cache of the foreign repository.
+access_profile="" access_host=""
 take_access() {
-  local dir="$scratch/access" name path profile
+  local dir="$scratch/access" name path json
   mkdir -m 700 "$dir"
-  tar -C "$dir" -x --no-same-owner -f -
-  [ -f "$dir/profile.toml" ] && [ -f "$dir/credentials.json" ] || die "no repository access on stdin (fleet-state access)"
-  profile="$(cat "$dir/profile.toml")"
+  tar -C "$dir" -x --no-same-owner --no-same-permissions -f -
+  if [ -n "$(find "$dir" -mindepth 1 ! -type f ! -type d)" ]; then
+    die "the access holds more than files"
+  fi
+  [ -f "$dir/repository.json" ] && [ -f "$dir/credentials.json" ] && [ -f "$dir/host" ] ||
+    die "no repository access on stdin (fleet-state access)"
+  access_host="$(head -n 1 "$dir/host")"
+  [[ $access_host =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] || die "the access names no host"
+  json="$(cat "$dir/repository.json")"
+  jq -e '[paths | map(tostring) | .[] | test("command|hook"; "i")] | any | not' <<<"$json" >/dev/null ||
+    die "the repository settings carry commands or hooks; not using them"
   while IFS=$'\t' read -r name path; do
-    [ -f "$dir/files/$name" ] || die "the access lacks $name"
-    profile="${profile//"\"$path\""/"\"$dir/files/$name\""}"
+    [[ $name =~ ^[A-Za-z0-9_-]+$ ]] && [ -f "$dir/files/$name" ] || die "the access lacks $name"
+    json="$(jq --arg p "$path" --arg n "$dir/files/$name" 'walk(if . == $p then $n else . end)' <<<"$json")"
   done < <(jq -r 'to_entries[] | [.key, .value] | @tsv' "$dir/credentials.json")
-  printf '%s\n' "$profile" >"$dir/profile.toml"
+  while IFS= read -r path; do
+    if [ -n "$path" ] && grep -qF -- "$path" <<<"$json"; then
+      die "the repository settings use $path other than as a whole value; not guessing"
+    fi
+  done < <(jq -r '.[]' "$dir/credentials.json")
   chmod -R go= "$dir"
+  jq -r '
+    def scalar: type != "object";
+    "[repository]",
+    (to_entries[] | select(.value | scalar) | "\(.key | tojson) = \(.value | tojson)"),
+    (to_entries[] | select(.value | scalar | not) |
+      "[repository.\(.key | tojson)]",
+      (.value | to_entries[] |
+        if (.value | scalar) then "\(.key | tojson) = \(.value | tojson)"
+        else error("nested too deep: \(.key)") end))' <<<"$json" >"$dir/profile.toml" ||
+    die "the repository settings are not a flat table"
   export RUSTIC_NO_CACHE=true
   access_profile="$dir/profile"
 }
 
 cmd_receive() {
-  local name="" kind="" replace=0 from="" want=latest
+  local name="" kind="" replace=0 from="" want=latest now=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --replace) replace=1 ;;
+      --place) now=1 ;;
       --from-backup) from="${2:?--from-backup needs a host}"; shift ;;
       --snapshot) want="${2:?--snapshot needs an id}"; shift ;;
       -*) usage ;;
@@ -894,6 +1119,7 @@ cmd_receive() {
   [ -n "$kind" ] || usage
   [[ $name =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || die "'$name' is not an entry name"
   [ ! -t 0 ] || die "receive reads a tar stream (fleet-state send or access) on stdin"
+  [ -n "$from" ] || [ "$want" = latest ] || die "--snapshot goes with --from-backup"
 
   local loc incoming id="" spath=""
   loc="$(location_of "$name" "$kind")"
@@ -907,43 +1133,97 @@ cmd_receive() {
   fi
   if [ -n "$from" ]; then
     take_access
-    id="$(find_snapshot "$access_profile" "$name" "$from" "$want")"
-    [ -n "$id" ] || die "$name: no backup '$want' of $from in that repository"
-    spath="$(rustic -P "$access_profile" snapshots --json --filter-host "$from" --filter-label "$name" |
-      jq -r --arg id "$id" '[.[].snapshots[] | select(.id == $id)][0].paths[0]')"
+    if [ "$access_host" != "$from" ]; then
+      log "$name: $from records its backups as $access_host"
+    fi
+    id="$(find_snapshot "$access_profile" "$name" "$access_host" "$want")"
+    [ -n "$id" ] || die "$name: no backup '$want' of $access_host in that repository"
+    spath="$(snapshot_path "$access_profile" "$id")"
   fi
   incoming="$loc.incoming"
   if location_exists "$incoming"; then
     log "$name: removing an incomplete receive ($incoming)"
     destroy_location "$incoming"
   fi
-  create_location "$incoming"
-  cleanups+=("destroy_if_exists '$incoming'")
+  create_location "$incoming" "$name"
+  # read by the cleanup below
+  # shellcheck disable=SC2034
+  keep_incoming=0
+  cleanups+=("[ \"\$keep_incoming\" = 1 ] || destroy_if_exists '$incoming'")
   open_location "$incoming"
   if [ -n "$from" ]; then
-    log "$name: restoring ${id:0:8}, $from's backup of $spath, into $loc"
+    log "$name: restoring ${id:0:8}, $from's backup of $spath"
     rustic -P "$access_profile" restore --no-progress --numeric-id "$id:$spath" "$opened"
+    restore_root "$access_profile" "$id" "$opened"
   else
-    log "$name: receiving into $loc"
-    tar -C "$opened" -x "${tar_flags[@]}" --same-permissions -f -
+    log "$name: receiving"
+    # tar only warns about what it could not set (ACLs, xattrs): that is a
+    # failure here, as is anything else it has to say
+    if ! tar -C "$opened" -x "${tar_flags[@]}" --same-permissions -f - 2>"$scratch/tar.err" ||
+      [ -s "$scratch/tar.err" ]; then
+      cat "$scratch/tar.err" >&2 || true
+      die "$name: the stream did not arrive whole; nothing kept"
+    fi
   fi
   close_location "$opened"
-  place "$name" "$incoming" "$loc"
+  if [ "$now" = 1 ]; then
+    place "$name" "$incoming" "$loc" "$replace"
+  else
+    # shellcheck disable=SC2034
+    keep_incoming=1
+    log "$name: received into $incoming (fleet-state place $name $kind, or abort)"
+  fi
 }
 
-# place <entry> <incoming> <location>: what was received becomes the entry's;
-# if the host uses the entry already, swapped in.
+# place <entry> <kind> [--replace]: what receive left in <location>.incoming
+# becomes the entry's.
+cmd_place() {
+  local name="" kind="" replace=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --replace) replace=1 ;;
+      -*) usage ;;
+      *) if [ -z "$name" ]; then name="$1"; elif [ -z "$kind" ]; then kind="$1"; else usage; fi ;;
+    esac
+    shift
+  done
+  [ -n "$kind" ] || usage
+  local loc
+  loc="$(location_of "$name" "$kind")"
+  lock
+  location_exists "$loc.incoming" || die "nothing received for $name ($loc.incoming)"
+  place "$name" "$loc.incoming" "$loc" "$replace"
+}
+
+# abort <entry> <kind>: what receive left, gone; never the entry itself.
+cmd_abort() {
+  [ $# = 2 ] || usage
+  local loc
+  loc="$(location_of "$1" "$2")"
+  lock
+  destroy_if_exists "$loc.incoming"
+}
+
+# place <entry> <incoming> <location> <replace>: what was received becomes
+# the entry's; if the host uses the entry already, swapped in.
 place() {
-  local name="$1" incoming="$2" loc="$3" aside
+  local name="$1" incoming="$2" loc="$3" replace="$4" aside
+  if location_exists "$loc" && [ "$replace" = 0 ]; then
+    die "$loc exists on $host (--replace swaps it out and keeps it aside)"
+  fi
   if has_entry "$name" && location_exists "$loc"; then
     swap_in "$name" "$incoming"
   else
+    swap_lock
+    critical
     if location_exists "$loc"; then
       aside="$(aside_name "$loc")"
       rename_location "$loc" "$aside"
       log "$name: what was there is kept aside as $aside"
     fi
     rename_location "$incoming" "$loc"
+    swap_unlock
+    uncritical
     if has_entry "$name"; then
       apply_properties "$name" "$loc"
       log "$name: received (fleet-state start $name)"
@@ -962,13 +1242,23 @@ set_readonly() { # <location> <on|off>
 }
 
 # Stopped (unless stop already did), blocked and read-only, so that the copy
-# a move leaves behind cannot diverge from the one moved.
+# a move leaves behind cannot diverge from the one moved.  --stopped: only if
+# a stop in this boot left them stopped all along (a move freezes what it
+# sent, not what ran again meanwhile).
 cmd_freeze() {
+  local only_stopped=0
+  if [ "${1:-}" = --stopped ]; then
+    only_stopped=1
+    shift
+  fi
   [ $# -gt 0 ] || usage
   local name
   local -a fresh=()
   for name in "$@"; do
     need_entry "$name"
+    if [ "$only_stopped" = 1 ]; then
+      still_stopped "$name" || die "$name has run again since it was stopped (a reboot, a start); not freezing it"
+    fi
     [ -f "$records/$name.blocked" ] || fresh+=("$name")
   done
   lock
@@ -992,35 +1282,13 @@ cmd_thaw() {
   resume "$@"
 }
 
-is_frozen() { # <location>
-  if [ "$backend" = zfs ]; then
-    [ "$(zfs get -H -o value readonly "$1")" = on ]
-  else
-    [ "$(btrfs property get -ts "$top/$1" ro)" = ro=true ]
-  fi
-}
-
 cmd_drop() {
   [ $# = 2 ] || usage
   local name="$1" kind="$2" loc m snap
+  ! has_entry "$name" || die "$name is still declared on $host; drop what a move left once the host is deployed without it"
   loc="$(location_of "$name" "$kind")"
   lock
   location_exists "$loc" || die "no $loc on $host"
-  if has_entry "$name"; then
-    # still declared (the host is not deployed yet): only once frozen, and
-    # its mount blocked too, so that nothing mounts an empty one meanwhile
-    is_frozen "$loc" || die "$name is declared on $host and not frozen; drop is for what a move left behind"
-    local mnt
-    local -a blocked
-    mnt="$(mount_unit "$(field "$name" path)")"
-    if [ -f "$records/$name.blocked" ]; then
-      mapfile -t blocked <"$records/$name.blocked"
-    else
-      blocked=()
-    fi
-    block "$name" "${blocked[@]}" "$mnt"
-    systemctl stop "$mnt"
-  fi
   # unmounted wherever it is still mounted
   if [ "$backend" = zfs ]; then
     while IFS= read -r m; do
@@ -1035,14 +1303,10 @@ cmd_drop() {
     done
   fi
   destroy_location "$loc"
-  if has_entry "$name"; then
-    log "$name: $loc destroyed; its units stay blocked until this host is deployed without it"
-  else
-    # a freeze's block, if the host has not rebooted since
-    unblock "$name"
-    rm -f "$records/$name.stopped"
-    log "$name: $loc destroyed"
-  fi
+  # a freeze's block, if the host has not rebooted since
+  unblock "$name"
+  rm -f "$records/$name.stopped"
+  log "$name: $loc destroyed"
 }
 
 # --- listing -------------------------------------------------------------------
@@ -1094,6 +1358,8 @@ case "$1" in
   rollback) shift; cmd_rollback "$@" ;;
   discard) shift; cmd_discard "$@" ;;
   send) shift; cmd_send "$@" ;;
+  place) shift; cmd_place "$@" ;;
+  abort) shift; cmd_abort "$@" ;;
   access) shift; cmd_access "$@" ;;
   receive) shift; cmd_receive "$@" ;;
   freeze) shift; cmd_freeze "$@" ;;

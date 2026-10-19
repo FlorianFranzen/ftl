@@ -281,8 +281,13 @@ arguments; stores need `root`.
   collisions, edits `service.nix` with a string replacement it checks by
   evaluating `fleet.services` again, then drives `fleet-state` on both
   hosts (`stop`, `backup`, `send | receive` or with `--via backup`
-  `access | receive --from-backup`, `freeze`) and `secrets sync`,
-  recording an undo step after each step that succeeded. Temporary directories are `0700` and
+  `access | receive --from-backup --snapshot <id the backup printed>`,
+  `place`, `freeze --stopped`) and `secrets sync`, under a lock in the
+  repository's git directory; each step's undo (`start`, `abort`, `thaw`;
+  `drop` once `place` succeeded) is recorded before the step, so a step
+  that fails halfway is undone too. It refuses when the old host would
+  have no `fleet-state` after its deploy. `state copy` is `send | receive`
+  and `place --replace` for one entry. Temporary directories are `0700` and
   removed on any exit.
 - `fleet-state.sh` (hosts, as root; packaged by `modules/state.nix` with the
   host's ZFS or btrfs tools): reads `/etc/fleet-state/state.json` (backend,
@@ -294,34 +299,50 @@ arguments; stores need `root`.
     what happens to be mounted at its path; a snapshot a dead run left is
     replaced.
   - Content is only ever written into a new dataset or subvolume
-    (`<location>.incoming`), which is then swapped in: the entry is
-    quiesced (its units and triggers blocked by a drop-in in `/run` that
-    asserts the absence of `/run/fleet-state/<entry>.blocked`, triggers
-    stopped, then the running units and instances, then the mount unit,
-    which takes nested entries along), the current location renamed to
-    `<location>.aside-<time>` (unique), the new one renamed into place, its
-    ZFS properties set, and whatever stopped meanwhile (units with a unit
-    file, but not a socket's spawned instances) started again.
-    `restore`, `rollback` and the moves' `receive` all work this way.
+    (`<location>.incoming`, a ZFS dataset with `acltype=posixacl`,
+    `xattr=sa` and the entry's properties), which is then swapped in: the
+    entry is quiesced (its units, triggers and mount blocked by a drop-in
+    in `/run` asserting the absence of `/run/fleet-state/<entry>.blocked`,
+    which also records the boot; triggers stopped, then the units and
+    instances running by then, then the mount unit, which takes nested
+    entries along), the current location renamed to
+    `<location>.aside-<time>` (unique, auto-snapshots off), the new one
+    renamed into place, its ZFS properties set, and of these units and
+    whatever needs them (`systemctl list-dependencies --reverse`) what
+    stopped is started again, except what other entries still block and a
+    socket's spawned instances. Records and blocks add up over repeated
+    stops. HUP, INT and TERM are held off during a swap, SIGPIPE is
+    ignored throughout (a lost admin connection fails writes, not the
+    run), and a cleanup puts the old location back and resumes if the swap
+    fails. The renames hold `/run/fleet-state.swap.lock`, which the state
+    module's creation script and activation snippet take too. `restore`,
+    `rollback` and the moves' `place` all work this way.
   - `backup` labels each rustic snapshot with the entry, records the host,
-    tags `fleet-entry:` and `fleet-service:`; `--all` prunes even when an
-    entry failed and writes the metrics (the last success kept when not).
-    Steps that may fail alone run in a subshell outside any condition, so
-    errexit holds in them.
+    tags `fleet-entry:`, `fleet-service:` and `fleet-root:<uid>:<gid>:<mode>`
+    (rustic keeps no metadata of an `--as-path` root; restores apply it),
+    and prints `<entry> <id>`; `--all` prunes even when an entry failed and
+    writes the metrics (the last success kept when not). Steps that may
+    fail alone run in a subshell outside any condition, so errexit holds
+    in them. "Latest" is the newest by host and label, whatever the path.
   - Moves: `send` streams a snapshot as a tar (numeric owners, ACLs,
-    xattrs, sparse files); `receive` untars into `<location>.incoming` and
-    renames it into place (swapped in if the host uses the entry already;
-    refused if the location exists, unless `--replace`), the entry need not
-    be declared; `freeze` quiesces (unless a `stop` did) and sets the
-    dataset or subvolume read-only; `thaw` undoes it; `drop` destroys the
-    location of an entry the host no longer declares (or still declares
-    but froze, blocking its mount too), with its leftover snapshots and
-    blocks. `access` writes a kind's rustic profile, `credentials.json`
-    and the credential files as a tar; `receive --from-backup <host>` reads
-    that on stdin into a `0700` directory below the scratch space in `/run`,
-    replaces each credential path in the profile (quoted, literally) by its
-    copy, finds `<host>`'s latest backup of the entry (or `--snapshot`)
-    with `RUSTIC_NO_CACHE`, and restores it into `.incoming`.
+    xattrs, sparse files), of a declared entry or, by kind, of one left
+    behind, and refuses entries with datasets or subvolumes below them;
+    `receive` untars into `<location>.incoming` (anything tar reports
+    fails it) and leaves it there; `place` renames it into place (swapped
+    in if the host uses the entry already; refused if the location exists,
+    unless `--replace`), `abort` removes it; `freeze` quiesces (unless a
+    `stop` did) and sets the location read-only, with `--stopped` only if a
+    stop in this boot kept the entry stopped all along; `thaw` undoes it;
+    `drop` destroys the location of an entry the host no longer declares,
+    with its snapshots and blocks, never anything below it. `access`
+    writes a kind's repository table as JSON (with `password-file`), the
+    host's name and the credential files as a tar; `receive --from-backup`
+    unpacks that into a `0700` directory below the scratch space, refuses
+    anything but plain files, settings with commands or hooks, and
+    credential paths used other than as whole values, points those into
+    the directory, writes the TOML profile itself, and restores the
+    snapshot named (or the newest of the recorded host) with
+    `RUSTIC_NO_CACHE`.
   - Snapshots, mounts and scratch space are undone on any exit, signals
     included; one changing run at a time (`/run/fleet-state.lock`).
 - `ftl-layers.sh` (hosts): environment from `modules/layers.nix`
