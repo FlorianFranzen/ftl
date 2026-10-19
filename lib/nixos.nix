@@ -298,7 +298,9 @@ let
         // {
           inherit (service) dir;
           sopsFile = if service.dir != null then service.dir + "/secrets.yaml" else null;
-          role = rolesOf (if hostName != null then hostName else args.config.fleet.meta.host) service;
+          # on a host its roles; elsewhere (nixosServices in another
+          # configuration) those of the configuration's fleet.meta.host, if any
+          role = rolesOf (if hostName != null then hostName else args.config.fleet.meta.host or null) service;
         };
       withArg =
         path:
@@ -380,6 +382,8 @@ let
       "ftl: user '${userName}' names undefined hosts: ${toString unknownHosts}";
     assert lib.assertMsg (unknownServices == [ ])
       "ftl: user '${userName}' names undefined services: ${toString unknownServices}";
+    assert lib.assertMsg (unknownHomes == [ ] || homes != { })
+      "ftl: user '${userName}' wants a home configuration, but there are none (no home/ folder, or no home-manager input)";
     assert lib.assertMsg (unknownHomes == [ ])
       "ftl: user '${userName}' wants home configurations that do not exist: ${toString unknownHomes}";
     lib.warnIf (user.hosts != [ ] && user.keys.ssh == [ ])
@@ -458,7 +462,10 @@ let
     kind: owner: dir: file: recipients:
     lib.optional (dir != null && recipients != { pgp = [ ]; age = [ ]; ssh = [ ]; }) {
       inherit kind owner recipients;
-      path = lib.removePrefix (toString root' + "/") (toString dir) + "/${file}";
+      path =
+        assert lib.assertMsg (root' != null)
+          "ftl: mkNixos needs `root` (the repository) to name the store ${toString dir}/${file}";
+        lib.removePrefix (toString root' + "/") (toString dir) + "/${file}";
     };
 
   stores =
@@ -603,12 +610,7 @@ let
     hostName: host:
     { lib, ... }:
     {
-      imports = [
-        ../modules/meta.nix
-        ../modules/layers.nix
-        ../modules/comin.nix
-        ../modules/compat.nix
-      ];
+      imports = [ ../modules/meta.nix ];
       config = {
         fleet.meta = {
           environment = name;
@@ -626,6 +628,7 @@ let
         fleet.layers.installed = lib.genAttrs host.layers (l: {
           kind = layerKind l;
         });
+        fleet.layers.repo = lib.mkIf (repo != null) (lib.mkDefault repo);
         fleet.secrets = lib.mkIf (host.dir != null) {
           file = lib.mkIf (builtins.pathExists (host.dir + "/secrets.yaml")) (host.dir + "/secrets.yaml");
           ageKeyFile = lib.mkIf (peers.${hostName} ? keys.age) "/var/lib/sops-nix/key.txt";
@@ -635,16 +638,7 @@ let
       };
     };
 
-  ftlModules = [
-    ../modules/builder.nix
-    ../modules/cache.nix
-    ../modules/client.nix
-    ../modules/layers.nix
-    ../modules/comin.nix
-    ../modules/state.nix
-    ../modules/access.nix
-    ../modules/secrets.nix
-  ];
+  ftlModules = import ../modules/all.nix;
 
   # The fleet as every host sees it; `self` is added per host below.
   fleet = {
