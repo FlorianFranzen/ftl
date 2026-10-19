@@ -67,6 +67,7 @@ rec {
           diffutils
           gnused
           gawk
+          util-linux # column, flock
         ];
         text = builtins.readFile ../scripts/fleetl.sh;
       };

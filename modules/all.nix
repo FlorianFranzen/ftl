@@ -7,6 +7,7 @@
   ./layers.nix
   ./comin.nix
   ./state.nix
+  ./backup.nix
   ./access.nix
   ./secrets.nix
 ]

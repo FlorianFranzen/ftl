@@ -149,6 +149,20 @@ each library function and module reads, provides and does.
                                   a command on a host, or on every host that is
                                   not ignored, pinned to its ssh.pub
   fleetl host show | service show | user show <name>
+  fleetl service move <service> <to> [--from <host>] [--via stream|backup]
+                     [--without-data] [--no-backup] [--yes]
+                                  the service and its state to another host
+  fleetl state list | snapshots <host> [<entry>]
+  fleetl state size | stop | start <host> <entry>...
+  fleetl state backup <host> --all|<entry>...
+  fleetl state restore <host> <entry> [--snapshot <id>] [--from-host <h>] [--no-start]
+  fleetl state rollback <host> <entry> [<aside>]
+  fleetl state discard <host> <aside>
+  fleetl state thaw <host> <entry>...
+  fleetl state drop <host> <entry> <kind>
+  fleetl state copy <from> <to> <entry> <kind>
+                                  fleet-state on the host, as root (sudo through
+                                  the forwarded agent unless the login is root)
   fleetl fleet generate [--force] [<generator>...]
                                   the fleet's generators whose files are missing
   fleetl fleet show               the fleet: hosts, services, users, keys, stores
@@ -233,14 +247,119 @@ Three things live under `nixos/` besides hosts, and they are easy to mix up:
   host keeps: each entry is a btrfs subvolume (`@apps/<name>`, `@data/<name>` on
   `fleet.storage.btrfsDevice`) or ZFS dataset (`<pool>/apps/<name>`, on
   `fleet.storage.zfsPool`), created on demand and mounted at `path` by a mount
-  unit its `units` wait for, so the root filesystem stays disposable. `kind =
+  unit its `units` wait for, so the root filesystem stays disposable. The
+  mount units name nothing but the storage (the setup service is ordered
+  before them, but none depends on it), so a deploy only unmounts an entry
+  when its storage changed, and restarting the setup unmounts nothing (see
+  `docs/state-mounts.md` for why). `kind =
   "state"` is small and precious (snapshotted, backed up by default), `"data"`
   bulk and re-obtainable. An entry declared by a service module with `service =
   service.name` moves with the service: its declaration, and its contents
   (`fleetl service show` lists them). A unit of an entry must run with a fixed
   uid or as `DynamicUser`, or evaluation fails: dynamically allocated uids
-  live on the root filesystem and would not survive a reinstall.
+  live on the root filesystem and would not survive a reinstall. On the
+  host, `fleet-state` (as root) lists the entries and backs them up.
+- **Backups** (`fleet.backup`) put every entry with `backup = true` into a
+  rustic repository per kind (`repositories.state`, `repositories.data`),
+  daily by default and pruned by `retention`. Each backup is taken from a
+  snapshot of the entry's dataset or subvolume, so services keep running,
+  and is recorded under the entry's real path, with the entry as label, the
+  host as host and `fleet-entry:<entry>`, `fleet-service:<service>` as tags.
+  Repositories are only created by `fleet-state init` (or the
+  `fleet-backup-init` service), never by a backup. `/etc/rustic/<kind>.toml`
+  makes them usable by hand (`rustic -P state snapshots`);
+  `metrics.textfileDir` writes `fleet_backup_last_success_timestamp_seconds`
+  and `fleet_backup_snapshots{kind}` for node_exporter.
 
+  A restore puts an entry back: `fleetl state restore <host> <entry>
+  [--snapshot <id>]` (on the host: `fleet-state restore`) restores the
+  latest backup of the entry by this host (or the one named), with the uids
+  and gids as they were and the owner and mode of its top directory (a
+  `fleet-root:` tag of the backup, as rustic does not keep them), into a new
+  dataset or subvolume next to the entry while it keeps running, then swaps
+  it in: the entry's units, triggers and mount are blocked from starting
+  and stopped, along with whatever needs them, the current dataset or
+  subvolume is renamed aside (`<location>.aside-<time>`) and the restored
+  one takes its name; then what stopped is started again. A lost
+  connection does not end a swap, a signal ends it only once it is done,
+  and a swap that fails puts the entry back as it was. An entry mounted inside another stays as it is.
+  `fleetl state rollback` swaps a copy kept aside back in (the current one
+  goes aside in turn), `fleetl state discard` destroys one, `fleetl state
+  list` shows them. `stop` and `start` do the unit part alone: a stopped
+  entry's units refuse to start until `start` (a drop-in in `/run`, so a
+  reboot lifts it, as does a deploy without the entry), and `start` starts
+  what `stop` stopped, however often it was stopped; what another stopped
+  entry still holds (a unit two entries share, a service needing a unit of
+  the other) starts with that entry. Datasets and
+  subvolumes below an entry are not part of its snapshots: backups warn
+  about them, moves refuse, nothing destroys them.
+- **Moving a service** with its state is one command, then a commit and two
+  deploys:
+
+  ```
+  fleetl service move web darwin          # from the one host web runs on
+  git commit -am 'web: on darwin'         # then deploy darwin, then the old host
+  fleetl state drop amphi web state       # once both are deployed and darwin runs it well
+  ```
+
+  It checks where the service runs, which entries are its (`service =
+  service.name`), that the target has `fleet-state` and none of them, shows
+  their sizes and asks; one move per repository at a time. Then it replaces
+  the old host by the new one in `service.nix`, in `hosts` and every role,
+  and refuses if evaluating it shows any other change, or if the old host
+  would have no `fleet-state` once deployed (nothing could drop what the
+  move leaves there). On the old host the entries are stopped (and
+  blocked), the ones backed up get a last backup, each entry is streamed
+  from a snapshot into `<location>.incoming` on the target (through the
+  admin's machine, as a tar with numeric owners, ACLs and xattrs; the
+  target's datasets have POSIX ACLs and SA xattrs; anything tar cannot read
+  or set fails the move, except sockets, which are not carried and are made
+  anew by whoever listens) and placed only once both ends finished, and
+  the old copies are frozen: read-only and blocked, and only if they stayed
+  stopped since (no reboot, no start meanwhile). A frozen copy stays
+  blocked across reboots: every entry's units assert the absence of
+  `/var/lib/fleet-state/frozen/<entry>`, which freeze writes and a deploy
+  without the entry removes. Last, `secrets sync` re-keys the service's
+  store for the target. Until then every step is undone on a failure, a
+  step that failed halfway included, as far as the hosts can be reached:
+  `service.nix` back, what this move placed on the target dropped (never
+  what was there before), the old copies thawed and started again. What
+  could not be undone is printed with the commands that do it by hand. The
+  hosts are reached as the deploy output says, evaluated once, with ssh in
+  batch mode, so that a lost host fails the move rather than hanging it. The service is down from the stop until the
+  target runs the new configuration; the target's datasets are there
+  before its deploy, so it starts on its state, never on an empty one.
+  `--from` picks the host of a service on several, `--no-backup` skips the
+  last backup, `--without-data` leaves the `data` entries on the old host,
+  unfrozen and out of the drop list: `fleetl state copy <from> <to> <entry>
+  data` brings one over later (swapped in on the target), and `drop
+  --force` removes it once the old host is deployed. `drop` only takes the
+  frozen copy a move left on a host that no longer declares the entry;
+  anything else (a copy just placed, a mistyped host) only with `--force`.
+
+  While an entry is stopped or frozen, a deploy of that host reports its
+  units as failed: they refuse to start, by design, until `start`, `thaw`
+  or the deploy that takes the entry away.
+
+  `--via backup` takes the backed-up entries through the backup instead of
+  the admin's machine: the target restores exactly the snapshot the last
+  backup made, straight from the old host's repository. The old host sends
+  its repository settings as data (the `[repository]` table, never a
+  profile: settings carrying commands or hooks are refused), the host name
+  its backups are recorded under, and the files they read
+  (`fleet.backup.passwordFile`, `credentialFiles`); only a local path, an
+  `opendal:` or a `rest:` repository is handed over; the target writes its
+  own profile pointing into a `0700` directory in `/run`, restores with no
+  rustic cache, and removes the directory. The credentials pass the
+  admin's machine in the pipe, and while the restore runs the target's root
+  could read and change the old host's repository; with per-host
+  repositories that is the old host's backup history. The target needs the
+  repository's transport in its PATH (`ssh` for sftp) and its host key.
+  Entries that are not backed up are streamed as before.
+
+  The target needs `fleet-state` before it has entries of its own; it is
+  there with any entry, a ZFS pool or backups, else set
+  `fleet.storage.tool.enable`.
 - **Layers** (`nixos/layers/<name>.nix`, `{ kind; packages = pkgs: [ … ]; units; }`)
   are independently versioned Nix profiles under
   `/nix/var/nix/profiles/layers/<name>`, combined with the base system at
@@ -354,6 +473,24 @@ see whether the library still works with the channel's current head:
   - `modules`: a `mkFlake` host with every ftl module enabled;
   - `state-btrfs`, `state-zfs`: `fleet.state` on an empty disk, then a
     filesystem or pool;
+  - `backup-btrfs`, `backup-zfs`: `fleet.backup` into a local repository:
+    init only by hand, labels, tags and hosts of the snapshots, owners kept,
+    the entry backed up rather than what is mounted at its path, no
+    snapshot or scratch directory left, a vanished repository failing;
+    restores of the latest and of an older backup swapped in with the
+    current content kept aside, rollback and discard, an entry mounted
+    inside another left alone, what needs the units, timers and a template
+    unit's socket stopped and started again, units blocked while stopped,
+    leftover snapshots replaced, a failing entry not failing the others;
+  - `move`: `fleetl service move` from a btrfs host to a ZFS host through
+    an admin machine (stubbed evaluation, real ssh and `fleet-state`):
+    refusals, a failed move undone without touching what was in the way,
+    then a move whose target, once switched to the moved configuration,
+    runs the service on the received state (content, owners, xattrs, ZFS
+    properties), a move `--via backup` restored on the target from the
+    source's sftp repository with no credentials left behind and the top
+    directories' owners and modes kept, and a source that lets go and drops
+    its frozen copies after its deploy, not before;
   - `services`: `fleet.secrets` with sops-nix for real: a host decrypts its own
     store and a service's with its SSH host key, no age key installed;
   - `layers`: layer install, update, pins and rollback, plus the comin hook;

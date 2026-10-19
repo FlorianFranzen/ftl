@@ -214,7 +214,8 @@ under `fleet.*`.
 | `client` | `fleet.client.*` | substituters, gc defaults, `ftl-status` | no |
 | `layers` | `fleet.layers.*` (`installed` set by mkNixos, `repo`, `verify`, timer) | `environment.profiles` for packages layers, a systemd generator linking units layers, `ftl-layers` and its update service and timer, `fleet.layers.hook` | `installed` comes from mkNixos; settable by hand |
 | `comin` | `fleet.comin.*`, whether comin's and lanzaboote's modules are present | `services.comin.postDeploymentCommand` = the hook (system profile sync for lanzaboote, then layer update) | no |
-| `state` | `fleet.state.<name>` (`path`, `kind`, `units`, `service`, `backup`, `snapshots`, `zfs.properties`), `fleet.storage` (`btrfsDevice`, `zfsPool`, `zfsProperties`) | the `fleet-state` service creating subvolumes/datasets, one mount unit per entry, `RequiresMountsFor` on its units, an assertion that its units run with fixed uids or `DynamicUser` | no |
+| `state` | `fleet.state.<name>` (`path`, `kind`, `units`, `service`, `backup`, `snapshots`, `zfs.properties`), `fleet.storage` (`btrfsDevice`, `zfsPool`, `zfsProperties`, `tool.enable`), `fleet.backup.enable` | the `fleet-state` service creating subvolumes/datasets (wanted by `local-fs.target`, `Before=` the mounts, none of which depends on it: a mount unit's text changes only with its storage, see `docs/state-mounts.md`), one mount unit per entry, `RequiresMountsFor` on its units, assertions (fixed uids or `DynamicUser`, entry names); the `fleet-state` tool and `/etc/fleet-state/state.json` (backend, device or pool, host, entries with ZFS properties) where there are entries, a ZFS pool or backups; an activation snippet lifting the blocks of entries no longer declared | no |
+| `backup` | `fleet.backup.*` (`repositories.<kind>`, `passwordFile`, `credentialFiles`, `packages`, `schedule`, `retention`, `metrics.textfileDir`), `fleet.state` | `/etc/rustic/<kind>.toml` (also `fleet.backup.profiles`), `/etc/fleet-state/backup.json`, the `fleet-backup` service and timer (`fleet-state backup --all`), `fleet-backup-init` | no |
 | `access` | `fleet.access.*` (`users` defaults to the host's fleet users, `sudo`, `knownHosts`, `initrdPort`); the `fleet` argument when present | accounts with keys and no password, sshd without passwords or root, sudo via pam_rssh, every host's keys in `known_hosts` | `users` and `knownHosts` need `fleet`; standalone, set `fleet.access.users` |
 | `secrets` | `fleet.secrets.*` (`file`, `shared` and `ageKeyFile` set by mkNixos); whether sops-nix's module is present | `sops.defaultSopsFile`, `sops.age.keyFile`, `sops.gnupg.sshKeyPaths = []`; `shared` for modules to point a secret at | `file` comes from mkNixos; settable by hand |
 | `scripts` (a function, not a module) | `pkgs` | the packaged scripts: `fleetl` (+`ftl` alias), `ftl-layers`, `ftl-status`, `ftl-pipeline`, `ftl-cache-retention` | no |
@@ -271,7 +272,101 @@ arguments; stores need `root`.
   admin's key); `host exec` runs a command on a host (or on every host that
   is not ignored) at the deploy output's address and login (else the host's
   `fqdn` or name, and root), pinned to its `ssh.pub` the way `mkDeploy` pins
-  deploys. Temporary directories are `0700` and removed on any exit.
+  deploys; `state` runs `fleet-state` on a host as root, its arguments
+  quoted for the remote shell (bash's `printf %q`), through `sudo` with the
+  agent forwarded (pam_rssh) unless the login is root; root on that host
+  can use the agent while it is forwarded. `service move` reads the
+  service from `fleet.services`, its entries from the old host's
+  `nixosConfigurations.<h>.config.fleet.state` and the new host's for
+  collisions, edits `service.nix` with a string replacement it checks by
+  evaluating `fleet.services` again, then drives `fleet-state` on both
+  hosts (`stop`, `backup`, `send | receive` or with `--via backup`
+  `access | receive --from-backup --snapshot <id the backup printed>`,
+  `place`, `freeze --stopped`) and `secrets sync`, under a lock in the
+  repository's git directory; each step's undo (`start`, `abort`, `thaw`;
+  `drop --force` of what it placed, once `place` succeeded) is recorded
+  before the step, with the command that does it by hand, so a step that
+  fails halfway is undone too, and what cannot be undone (a host out of
+  reach) is printed. The deploy output (`sshUser`, the nodes' hostnames)
+  is evaluated once per run, its absence meaning root and fqdn, its failure
+  an error; ssh runs with `BatchMode` and a connect timeout. It refuses when the old host would
+  have no `fleet-state` after its deploy. `state copy` is `send | receive`
+  and `place --replace` for one entry. Temporary directories are `0700` and
+  removed on any exit.
+- `fleet-state.sh` (hosts, as root; packaged by `modules/state.nix` with the
+  host's ZFS or btrfs tools): reads `/etc/fleet-state/state.json` (backend,
+  device or pool, host, entries with their ZFS properties) and, with backups
+  on, `backup.json` and `/etc/rustic/<kind>.toml`.
+  - Content is always read from a read-only snapshot of the entry's dataset
+    or subvolume (ZFS: `<dataset>@<tag>`, mounted below a scratch directory;
+    btrfs: `@fleet-snapshots/<entry>@<tag>` on the top level), never from
+    what happens to be mounted at its path; a snapshot a dead run left is
+    replaced.
+  - Content is only ever written into a new dataset or subvolume
+    (`<location>.incoming`, a ZFS dataset with `acltype=posixacl`,
+    `xattr=sa` and the entry's properties), which is then swapped in: the
+    entry is quiesced (its units, triggers and mount blocked by a drop-in
+    in `/run` asserting the absence of `/run/fleet-state/<entry>.blocked`,
+    which also records the boot; triggers stopped, then the units and
+    instances running by then, then the mount unit, which takes nested
+    entries along), the current location renamed to
+    `<location>.aside-<time>` (unique, auto-snapshots off), the new one
+    renamed into place, its ZFS properties set, and what of the entry's
+    scope stopped is started again. The scope is its units, triggers and
+    mount and what needs them, walked along `RequiredBy`, `BoundBy`,
+    `ConsistsOf`, `RequisiteOf` and `TriggeredBy` but never through a
+    target; each entry records its own, first all of it that is active (so
+    a failure halfway can be resumed), at the end what actually stopped.
+    Records and blocks add up over repeated stops; on resume, what another
+    entry still blocks, and what needs that, is handed to that entry's
+    record (held by drop-in, so a blocked template holds its instances);
+    a unit that needs a blocked unit only through a target is not seen as
+    held. Active sockets, timers and paths in the scope are stopped too.
+    HUP, INT and TERM are held during a swap and end the run after
+    it, SIGPIPE is ignored throughout (a lost admin connection fails
+    writes, not the run), and a cleanup registered before the swap puts
+    the old location back and resumes (only the mounts with `--no-start`)
+    if it fails. The renames hold `/run/fleet-state.swap.lock`, which the state
+    module's creation script and activation snippet take too. `restore`,
+    `rollback` and the moves' `place` all work this way.
+  - `backup` labels each rustic snapshot with the entry, records the host,
+    tags `fleet-entry:`, `fleet-service:` and `fleet-root:<uid>:<gid>:<mode>`
+    (rustic keeps no metadata of an `--as-path` root; restores apply it,
+    or for a backup without the tag the root's owner and mode as they are),
+    and prints `<entry> <id>`; `--all` prunes even when an entry failed and
+    writes the metrics (the last success kept when not). Steps that may
+    fail alone run in a subshell outside any condition, so errexit holds
+    in them. "Latest" is the newest by host and label, whatever the path.
+  - Moves: `send` streams a snapshot as a tar (numeric owners, ACLs,
+    xattrs, sparse files), of a declared entry or, by kind, of one left
+    behind, and refuses entries with datasets or subvolumes below them;
+    `receive` untars into `<location>.incoming` (anything tar reports
+    fails it) and leaves it there; `place` renames it into place (swapped
+    in if the host uses the entry already; refused if the location exists,
+    unless `--replace`), `abort` removes it; `freeze` quiesces (unless a
+    `stop` did) and sets the location read-only, with `--stopped` only if a
+    stop in this boot kept the entry stopped all along, and writes
+    `/var/lib/fleet-state/frozen/<entry>`, which the state module makes
+    every unit of the entry assert absent (so the block survives reboots;
+    the activation snippet removes markers of entries no longer declared);
+    `thaw` undoes it; `drop` destroys the location of an entry the host no
+    longer declares if it is frozen (marker, or `readonly` set locally /
+    `ro` on btrfs), anything else only with `--force`, with its snapshots
+    and blocks, never anything below it. `send` fails on anything tar
+    reports but sockets, which it counts and leaves out. `size` reads ZFS's
+    `referenced`, a btrfs qgroup when quotas are on, else counts with
+    `du`. `access`
+    writes a kind's repository table as JSON (with `password-file`), the
+    host's name and the credential files as a tar; `receive --from-backup`
+    unpacks that into a `0700` directory below the scratch space, refuses
+    anything but plain files, settings with commands, hooks or nulls,
+    repositories other than a local path, `opendal:` or `rest:` (rclone can
+    run commands), and credential paths used other than as whole values, points those into
+    the directory, writes the TOML profile itself, and restores the
+    snapshot named (or the newest of the recorded host) with
+    `RUSTIC_NO_CACHE`.
+  - Snapshots, mounts and scratch space are undone on any exit, signals
+    included; one changing run at a time (`/run/fleet-state.lock`).
 - `ftl-layers.sh` (hosts): environment from `modules/layers.nix`
   (`FTL_REPO_URL`, `FTL_LAYERS`, `FTL_STATE_DIR`, `FTL_PROFILE_DIR`,
   `FTL_VERIFY_MODE`, ...); installs each layer's `nixosLayers.<sys>.<l>` at

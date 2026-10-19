@@ -19,7 +19,10 @@
 #          operating on all state (snapshots, replication, a reservation) sweeps
 #          up terabytes of it.  Lives in <pool>/data or @data.
 #
-# Each entry is created on demand and mounted at `path`; moving it to another
+# Each entry is created by fleet-state.service (at boot, and again with every
+# deploy that changes the entries; it is ordered before the mounts, but no
+# mount depends on it, so restarting it never unmounts anything) and mounted
+# at `path`; moving it to another
 # host is moving its declaration (with its fleet service) and its contents.  On
 # ZFS, the two parents get the properties of fleet.storage.zfsProperties (e.g. a
 # reservation for state, a quota for data), and every dataset its own
@@ -32,8 +35,16 @@
 # /var/lib/nixos on the root filesystem): use a fixed uid or DynamicUser.
 # An entry whose unit runs as a user without one fails evaluation.
 #
-# `backup` and `snapshots` are declarations for whatever does the backing up;
-# this module only creates and mounts.
+# `backup` and `snapshots` are declarations for whatever does the backing up
+# (fleet.backup does, with rustic); this module creates and mounts.
+#
+# On the host, `fleet-state` (as root) works on the entries: snapshots,
+# backups and restores, and moving an entry to another host; `fleetl state`
+# and `fleetl service move` drive it from the admin's machine.  It reads
+# /etc/fleet-state/state.json, written here.  A host that has no entries yet
+# but should receive one (a service moving to it) needs
+# `fleet.storage.tool.enable`, which is on whenever there are entries, a ZFS
+# pool or backups.
 {
   config,
   lib,
@@ -68,12 +79,16 @@ let
   floatingUser =
     unit:
     let
-      sc = config.systemd.services.${unit}.serviceConfig or { };
+      sc = config.systemd.services.${lib.removeSuffix ".service" unit}.serviceConfig or { };
       user = sc.User or null;
       dynamic = sc.DynamicUser or false;
       fixed = user != null && config.users.users ? ${user} && config.users.users.${user}.uid != null;
     in
     if dynamic == true || user == null || !(config.users.users ? ${user}) || fixed then null else user;
+
+  invalidNames = lib.filter (n: builtins.match "[A-Za-z0-9][A-Za-z0-9_-]*" n == null) (
+    builtins.attrNames entries
+  );
 
   floating = lib.concatLists (
     lib.mapAttrsToList (
@@ -110,7 +125,7 @@ let
       lib.mapAttrsToList (_: entry: ''
         dataset=${lib.escapeShellArg entry.location}
         if ! zfs list -H -o name "$dataset" >/dev/null 2>&1; then
-          zfs create -o mountpoint=legacy "$dataset"
+          zfs create -o mountpoint=legacy -o acltype=posixacl -o xattr=sa "$dataset"
         fi
         ${zfsSet ''"$dataset"'' (
           { "com.sun:auto-snapshot" = lib.boolToString entry.snapshots; } // entry.zfs.properties
@@ -118,10 +133,58 @@ let
       '') entries
     );
 
+  hasStorage = zfs || device != null;
+
+  # What fleet-state knows about this host's storage and entries.
+  stateJson = builtins.toJSON {
+    backend = if zfs then "zfs" else "btrfs";
+    inherit device pool parents;
+    host = config.networking.hostName;
+    entries = lib.mapAttrs (_: e: {
+      inherit (e)
+        path
+        location
+        kind
+        units
+        service
+        backup
+        ;
+      # what fleet-state sets on a dataset it makes for the entry
+      zfsProperties = lib.optionalAttrs zfs (
+        { "com.sun:auto-snapshot" = lib.boolToString e.snapshots; } // e.zfs.properties
+      );
+    }) entries;
+  };
+
+  tool = pkgs.writeShellApplication {
+    name = "fleet-state";
+    runtimeInputs =
+      with pkgs;
+      [
+        coreutils
+        util-linux
+        jq
+        gnutar
+        gnugrep
+        gawk
+        systemd
+        rustic
+      ]
+      ++ (if zfs then [ zfsPackage ] else [ btrfs-progs ])
+      ++ storage.tool.packages;
+    text = builtins.readFile ../scripts/fleet-state.sh;
+    # `scoped` changes the cleanups in a subshell on purpose: they are its own
+    excludeShellChecks = [
+      "SC2030"
+      "SC2031"
+    ];
+  };
+
   btrfsScript = ''
     top=$(mktemp -d /run/fleet-state.XXXXXX)
+    # gone on any exit, a failing mount included
+    trap 'umount "$top" 2>/dev/null || true; rmdir "$top"' EXIT
     mount -o subvolid=5 ${lib.escapeShellArg device} "$top"
-    trap 'umount "$top"; rmdir "$top"' EXIT
 
     for subvolume in ${
       lib.concatStringsSep " " (
@@ -220,6 +283,33 @@ in
         description = "ZFS pool that holds <pool>/apps and <pool>/data; takes precedence over btrfs.";
       };
 
+      tool = {
+        enable = lib.mkOption {
+          type = lib.types.bool;
+          # a host keeps it after its last entry moved away when it has backups or ZFS
+          default = entries != { } || zfs || (config.fleet.backup.enable or false);
+          defaultText = lib.literalExpression "fleet.state != { } || fleet.storage.zfsPool != null || fleet.backup.enable";
+          description = ''
+            Install fleet-state, the host's tool for snapshots, backups,
+            restores and moves of its entries.  A host that a service with
+            state is to move to needs it before it has entries of its own.
+          '';
+        };
+        package = lib.mkOption {
+          type = lib.types.package;
+          readOnly = true;
+          default = tool;
+          defaultText = lib.literalMD "fleet-state";
+          description = "fleet-state, as built for this host.";
+        };
+        packages = lib.mkOption {
+          type = lib.types.listOf lib.types.package;
+          default = [ ];
+          internal = true;
+          description = "Further programs fleet-state needs (the backup repository's transport).";
+        };
+      };
+
       zfsProperties = lib.mapAttrs (
         kind: _:
         lib.mkOption {
@@ -231,93 +321,149 @@ in
     };
   };
 
-  config = lib.mkIf (entries != { }) {
-    assertions = [
-      {
-        assertion = zfs || device != null;
-        message = "fleet.state needs a btrfs filesystem (fleet.storage.btrfsDevice) or a ZFS pool (fleet.storage.zfsPool)";
-      }
-      {
-        assertion = floating == [ ];
-        message = ''
-          fleet.state: a unit runs as a user without a fixed uid, so its files
-          would belong to someone else after a reinstall; set users.users.<user>.uid
-          or use DynamicUser:
-            ${lib.concatStringsSep "\n  " floating}'';
-      }
-    ];
-
-    systemd.services = lib.mkMerge (
-      [
+  config = lib.mkMerge [
+    (lib.mkIf (storage.tool.enable && hasStorage) {
+      environment.systemPackages = [ tool ];
+      environment.etc."fleet-state/state.json".text = stateJson;
+    })
+    (lib.mkIf hasStorage {
+      # fleet-state blocks an entry's units with drop-ins in /run while it is
+      # stopped or frozen; a configuration without the entry lifts them
+      system.activationScripts.fleet-state-blocks = lib.stringAfter [ "etc" ] ''
+        (
+          exec 8>/run/fleet-state.swap.lock
+          ${pkgs.util-linux}/bin/flock 8
+          # and the freezes of entries no longer declared
+          for marker in /var/lib/fleet-state/frozen/*; do
+            [ -e "$marker" ] || continue
+            if ! ${pkgs.jq}/bin/jq -e --arg n "$(basename "$marker")" '.entries | has($n)' /etc/fleet-state/state.json >/dev/null 2>&1; then
+              rm -f "$marker"
+            fi
+          done
+          for record in /run/fleet-state/*.blocked; do
+            [ -e "$record" ] || continue
+            name="$(basename "$record" .blocked)"
+            if ! ${pkgs.jq}/bin/jq -e --arg n "$name" '.entries | has($n)' /etc/fleet-state/state.json >/dev/null 2>&1; then
+              while IFS= read -r unit; do
+                rm -f "/run/systemd/system/$unit.d/fleet-state-$name.conf"
+                rmdir "/run/systemd/system/$unit.d" 2>/dev/null || true
+              done <"$record"
+              rm -f "$record" "/run/fleet-state/$name.stopped" "/run/fleet-state/$name.boot"
+            fi
+          done
+        )
+      '';
+    })
+    (lib.mkIf (entries != { }) {
+      assertions = [
         {
-          fleet-state = {
-            description = "Subvolumes or datasets for state and data";
-            unitConfig.DefaultDependencies = false;
-
-            serviceConfig = {
-              Type = "oneshot";
-              RemainAfterExit = true;
-            };
-
-            path = [
-              pkgs.coreutils
-              pkgs.util-linux
-            ]
-            ++ (if zfs then [ zfsPackage ] else [ pkgs.btrfs-progs ]);
-
-            script = if zfs then zfsScript else btrfsScript;
-          }
-          // (
-            if zfs then
-              {
-                requires = [ "zfs-import.target" ];
-                after = [ "zfs-import.target" ];
-              }
-            else
-              {
-                requires = [ "${utils.escapeSystemdPath device}.device" ];
-                after = [ "${utils.escapeSystemdPath device}.device" ];
-              }
-          );
+          assertion = zfs || device != null;
+          message = "fleet.state needs a btrfs filesystem (fleet.storage.btrfsDevice) or a ZFS pool (fleet.storage.zfsPool)";
         }
-      ]
-      # Every entry's units wait for (and stop without) its mount.
-      ++ lib.mapAttrsToList (
+        {
+          # entry names become dataset, subvolume and snapshot names, and are
+          # passed around by fleet-state and fleetl
+          assertion = invalidNames == [ ];
+          message = "fleet.state: entry names are letters, digits, - and _: ${toString invalidNames}";
+        }
+        {
+          assertion = floating == [ ];
+          message = ''
+            fleet.state: a unit runs as a user without a fixed uid, so its files
+            would belong to someone else after a reinstall; set users.users.<user>.uid
+            or use DynamicUser:
+              ${lib.concatStringsSep "\n  " floating}'';
+        }
+      ];
+
+      systemd.services = lib.mkMerge (
+        [
+          {
+            fleet-state = {
+              description = "Subvolumes or datasets for state and data";
+              unitConfig.DefaultDependencies = false;
+              # The ordering lives here, not in the mounts: a mount unit's
+              # text is what switch-to-configuration compares, and any change
+              # to it (this service's name, say) unmounts the entry on the
+              # next deploy, failing it if anything holds the mount (see
+              # docs/state-mounts.md).  Pulled in at boot, before the mounts;
+              # restarting it leaves them alone.
+              wantedBy = [ "local-fs.target" ];
+              before = lib.mapAttrsToList (_: entry: "${utils.escapeSystemdPath entry.path}.mount") entries;
+
+              serviceConfig = {
+                Type = "oneshot";
+                RemainAfterExit = true;
+              };
+
+              path = [
+                pkgs.coreutils
+                pkgs.util-linux
+              ]
+              ++ (if zfs then [ zfsPackage ] else [ pkgs.btrfs-progs ]);
+
+              # not while fleet-state swaps a location (it would find it missing)
+              script = ''
+                exec 8>/run/fleet-state.swap.lock
+                flock 8
+              ''
+              + (if zfs then zfsScript else btrfsScript);
+            }
+            // (
+              if zfs then
+                {
+                  requires = [ "zfs-import.target" ];
+                  after = [ "zfs-import.target" ];
+                }
+              else
+                {
+                  requires = [ "${utils.escapeSystemdPath device}.device" ];
+                  after = [ "${utils.escapeSystemdPath device}.device" ];
+                }
+            );
+          }
+        ]
+        # Every entry's units wait for (and stop without) its mount, and do
+        # not start while fleet-state has the entry frozen (the copy a move
+        # left, until the deploy that takes the entry away), reboots included.
+        ++ lib.mapAttrsToList (
+          name: entry:
+          lib.genAttrs entry.units (_: {
+            unitConfig.RequiresMountsFor = [ entry.path ];
+            unitConfig.AssertPathExists = [ "!/var/lib/fleet-state/frozen/${name}" ];
+          })
+        ) entries
+      );
+
+      # Mount units rather than fileSystems: only wanted by local-fs.target, so a
+      # broken one cannot keep the host from booting (and test VMs, which replace
+      # fileSystems with their own, keep them).
+      # Only what, where, type and options: nothing that changes unless the
+      # storage does (see fleet-state above).
+      systemd.mounts = lib.mapAttrsToList (
         _: entry:
-        lib.genAttrs entry.units (_: {
-          unitConfig.RequiresMountsFor = [ entry.path ];
-        })
-      ) entries
-    );
+        {
+          where = entry.path;
+          wantedBy = [ "local-fs.target" ];
+        }
+        // (
+          if zfs then
+            {
+              what = entry.location;
+              type = "zfs";
+            }
+          else
+            {
+              what = device;
+              type = "btrfs";
+              options = lib.concatStringsSep "," ([ "subvol=${entry.location}" ] ++ btrfsOptions);
+            }
+        )
+      ) entries;
 
-    # Mount units rather than fileSystems: only wanted by local-fs.target, so a
-    # broken one cannot keep the host from booting (and test VMs, which replace
-    # fileSystems with their own, keep them).
-    systemd.mounts = lib.mapAttrsToList (
-      _: entry:
-      {
-        where = entry.path;
-        requires = [ "fleet-state.service" ];
-        after = [ "fleet-state.service" ];
-        wantedBy = [ "local-fs.target" ];
-      }
-      // (
-        if zfs then
-          {
-            what = entry.location;
-            type = "zfs";
-          }
-        else
-          {
-            what = device;
-            type = "btrfs";
-            options = lib.concatStringsSep "," ([ "subvol=${entry.location}" ] ++ btrfsOptions);
-          }
-      )
-    ) entries;
-
-    # DynamicUser state lives below /var/lib/private, which must stay 0700 even
-    # when it was first created as a mount point.
-    systemd.tmpfiles.rules = [ "d /var/lib/private 0700 root root -" ];
-  };
+      # DynamicUser state lives below /var/lib/private, which must stay 0700 even
+      # when it was first created as a mount point.
+      systemd.tmpfiles.rules = [ "d /var/lib/private 0700 root root -" ];
+    })
+  ];
 }
