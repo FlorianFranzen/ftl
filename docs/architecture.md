@@ -307,14 +307,19 @@ arguments; stores need `root`.
     instances running by then, then the mount unit, which takes nested
     entries along), the current location renamed to
     `<location>.aside-<time>` (unique, auto-snapshots off), the new one
-    renamed into place, its ZFS properties set, and of these units and
-    whatever needs them (`systemctl list-dependencies --reverse`) what
-    stopped is started again, except what other entries still block and a
-    socket's spawned instances. Records and blocks add up over repeated
-    stops. HUP, INT and TERM are held off during a swap, SIGPIPE is
-    ignored throughout (a lost admin connection fails writes, not the
-    run), and a cleanup puts the old location back and resumes if the swap
-    fails. The renames hold `/run/fleet-state.swap.lock`, which the state
+    renamed into place, its ZFS properties set, and what of the entry's
+    scope stopped is started again. The scope is its units, triggers and
+    mount and what needs them, walked along `RequiredBy`, `BoundBy`,
+    `ConsistsOf`, `RequisiteOf` and `TriggeredBy` but never through a
+    target; each entry records its own, first all of it that is active (so
+    a failure halfway can be resumed), at the end what actually stopped.
+    Records and blocks add up over repeated stops; on resume, what another
+    entry still blocks, and what needs that, is handed to that entry's
+    record. HUP, INT and TERM are held during a swap and end the run after
+    it, SIGPIPE is ignored throughout (a lost admin connection fails
+    writes, not the run), and a cleanup registered before the swap puts
+    the old location back and resumes (only the mounts with `--no-start`)
+    if it fails. The renames hold `/run/fleet-state.swap.lock`, which the state
     module's creation script and activation snippet take too. `restore`,
     `rollback` and the moves' `place` all work this way.
   - `backup` labels each rustic snapshot with the entry, records the host,
@@ -338,8 +343,9 @@ arguments; stores need `root`.
     writes a kind's repository table as JSON (with `password-file`), the
     host's name and the credential files as a tar; `receive --from-backup`
     unpacks that into a `0700` directory below the scratch space, refuses
-    anything but plain files, settings with commands or hooks, and
-    credential paths used other than as whole values, points those into
+    anything but plain files, settings with commands, hooks or nulls,
+    repositories other than a local path, `opendal:` or `rest:` (rclone can
+    run commands), and credential paths used other than as whole values, points those into
     the directory, writes the TOML profile itself, and restores the
     snapshot named (or the newest of the recorded host) with
     `RUSTIC_NO_CACHE`.

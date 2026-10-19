@@ -767,7 +767,7 @@ service_move() {
   fi
 
   # one fleetl changing this repository's fleet at a time
-  exec 7>"$(git rev-parse --git-dir)/fleetl.lock"
+  exec 7>"$(git rev-parse --git-common-dir)/fleetl.lock"
   flock -n 7 || die "another fleetl is moving a service of this repository"
 
   # Undone on any failure from here on, last done first.
@@ -792,9 +792,11 @@ service_move() {
   echo "$file: $from -> $to"
   # what the move leaves on <from> is dropped with fleet-state, once <from>
   # is deployed without the service: it has to have it then
-  if [ "${#names[@]}" -gt 0 ] &&
-    [ "$(nix eval --json ".#nixosConfigurations.\"$from\".config.fleet.storage.tool.enable" 2>/dev/null)" = false ]; then
-    die "$from would have no fleet-state once deployed (no entries left, no backups, no ZFS), and its frozen copies could not be dropped: set fleet.storage.tool.enable there first"
+  if [ "${#names[@]}" -gt 0 ]; then
+    local keeps
+    keeps="$(nix eval --json ".#nixosConfigurations.\"$from\".config.fleet.storage.tool.enable" 2>/dev/null || echo unknown)"
+    [ "$keeps" = true ] ||
+      die "$from would have no fleet-state once deployed ($keeps: no entries left, no backups, no ZFS?), and its frozen copies could not be dropped: set fleet.storage.tool.enable there first"
   fi
 
   if [ "${#names[@]}" -gt 0 ]; then

@@ -35,6 +35,12 @@ pkgs.testers.runNixOSTest {
           units = [ "mail" ];
           service = "mail";
         };
+        # bulk data of the same service, used by the same unit
+        mail-spool = {
+          path = "/srv/mail-spool";
+          kind = "data";
+          units = [ "mail" ];
+        };
         # used by a socket-activated template unit
         echo = {
           path = "/var/lib/echo";
@@ -124,6 +130,7 @@ pkgs.testers.runNixOSTest {
         machine.succeed("zpool create -O mountpoint=none tank /dev/vdb")
     else:
         machine.succeed("mkfs.btrfs -f /dev/vdb")
+    machine.succeed("systemctl start $(systemd-escape --path --suffix=mount /srv/mail-spool)")
     machine.succeed("systemctl start mail.service srv-library.mount outer.service dep.service outer.timer var-lib-outer-media.mount")
     machine.succeed("head -c 1M /dev/urandom > /var/lib/mail/inbox && chown mail:mail /var/lib/mail/inbox")
     machine.succeed("head -c 1M /dev/urandom > /srv/library/film")
@@ -295,6 +302,40 @@ pkgs.testers.runNixOSTest {
         machine.fail("systemctl start mail.service")  # still stopped, still blocked
         machine.succeed("fleet-state start mail")
         machine.succeed("systemctl is-active mail.service")
+
+    with subtest("entries sharing a unit, started one by one, leave it running"):
+        machine.succeed("fleet-state stop mail && fleet-state stop mail-spool")
+        machine.succeed("fleet-state start mail")
+        machine.fail("systemctl is-active mail.service")  # mail-spool still holds it
+        machine.succeed("fleet-state start mail-spool")
+        machine.succeed("systemctl is-active mail.service")
+        # what needs a unit another entry still blocks waits for that entry
+        machine.succeed("fleet-state stop outer mail")
+        machine.succeed("fleet-state start mail")
+        machine.succeed("systemctl is-active mail.service")
+        machine.fail("systemctl is-active dep.service")
+        machine.succeed("fleet-state start outer")
+        machine.succeed("systemctl is-active outer.service dep.service outer.timer")
+
+    with subtest("freeze --stopped refuses what ran again since the stop"):
+        machine.succeed("fleet-state stop echo && fleet-state start echo")
+        machine.fail("fleet-state freeze --stopped echo")
+        machine.succeed("fleet-state stop echo && fleet-state freeze --stopped echo")
+        machine.fail("touch /var/lib/echo/frozen")
+        machine.succeed("fleet-state thaw echo")
+        machine.succeed("systemctl is-active echo.socket")
+
+    with subtest("a repository access is refused unless it is plain data"):
+        def access(files, extra=""):
+            cmds = ["rm -rf /tmp/acc && mkdir -p /tmp/acc/files && echo alpha > /tmp/acc/host",
+                    "echo '{}' > /tmp/acc/credentials.json"] + files
+            machine.succeed(" && ".join(cmds))
+            machine.fail(f"tar -C /tmp/acc -c . | fleet-state receive evil state --from-backup alpha {extra}")
+            machine.fail("zfs list tank/apps/evil.incoming" if zfs else "test -e /var/lib/evil")
+        access(["ln -s /etc/passwd /tmp/acc/repository.json"])
+        access(["echo '{\"repository\": \"/var/backup/state\", \"hooks\": {}}' > /tmp/acc/repository.json"])
+        access(["echo '{\"repository\": \"rclone:x:y\"}' > /tmp/acc/repository.json"])
+        machine.succeed("test -s /etc/passwd")
 
     with subtest("a restore keeps the owner and mode of the entry's top directory"):
         machine.succeed("chmod 0710 /var/lib/mail")

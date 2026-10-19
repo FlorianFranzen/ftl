@@ -25,24 +25,30 @@
 #
 # Moving an entry to another host (fleetl service move drives these):
 #
-#   fleet-state send <entry>               the entry, from a snapshot of it, as a tar
+#   fleet-state send <entry> [<kind>]      the entry (a declared one, or by kind one a move
+#                                          left behind), from a snapshot of it, as a tar
 #                                          stream on stdout
-#   fleet-state receive <entry> <kind> [--replace]
-#                                          a tar stream on stdin into a new dataset or
-#                                          subvolume for the entry, which this host need
-#                                          not declare yet; an existing one is refused,
-#                                          or with --replace swapped out and kept aside
+#   fleet-state receive <entry> <kind> [--place [--replace]]
+#                                          a tar stream on stdin into <location>.incoming,
+#                                          for an entry this host need not declare yet;
+#                                          anything tar reports fails it
+#   fleet-state receive <entry> <kind> --from-backup <host> [--snapshot <id>] [--place]
+#                                          the same, restored from <host>'s backup of the
+#                                          entry, with access to its repository on stdin
+#                                          (see access), kept in a 0700 directory in /run
+#                                          for the restore and removed after
+#   fleet-state place <entry> <kind> [--replace]
+#                                          what receive left becomes the entry (swapped in if
+#                                          the host uses it); an existing one is refused, or
+#                                          with --replace kept aside
+#   fleet-state abort <entry> <kind>       what receive left, removed
 #   fleet-state access <kind>              the repository of a kind, as a tar stream on
-#                                          stdout: its profile and the credentials it
-#                                          reads, for a restore on another host
-#   fleet-state receive <entry> <kind> --from-backup <host> [--snapshot <id>] [--replace]
-#                                          the same, but restored from <host>'s backup of
-#                                          the entry, with access to its repository (see
-#                                          access) on stdin, kept in a 0700 directory in
-#                                          /run for the restore and removed after
-#   fleet-state freeze <entry>...          stopped, blocked and read-only: the copy left
-#                                          behind cannot change any more (until a reboot
-#                                          lifts the block, the read-only stays)
+#                                          stdout: its settings, the host its backups are
+#                                          recorded under, the credentials they read
+#   fleet-state freeze [--stopped] <entry>...
+#                                          stopped, blocked and read-only: the copy left
+#                                          behind cannot change any more; --stopped: only if
+#                                          a stop in this boot kept it stopped all along
 #   fleet-state thaw <entry>...            undo freeze
 #   fleet-state drop <entry> <kind>        destroy what a move left behind of an entry
 #                                          this host no longer declares
@@ -127,15 +133,21 @@ cleanup() {
 trap cleanup EXIT
 # The admin's connection going away must not end a run halfway: a write to
 # it fails instead of killing (log does not care), and inside a swap HUP,
-# INT and TERM wait until the entry is whole again.  Elsewhere they end the
-# run through the cleanup.
+# INT and TERM are held until the entry is whole again, then end the run.
+# Elsewhere they end it at once, through the cleanup.
 trap '' PIPE
+pending=""
 uncritical() {
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
+  if [ -n "$pending" ]; then exit "$pending"; fi
 }
-critical() { trap '' HUP INT TERM; }
+critical() {
+  trap 'pending=129' HUP
+  trap 'pending=130' INT
+  trap 'pending=143' TERM
+}
 uncritical
 
 # Never call it as a condition (`scoped ... || ...`, `if scoped`): bash turns
@@ -186,6 +198,7 @@ mount_top() {
 
 # The dataset or subvolume of an entry by name and kind, declared or not.
 location_of() { # <entry> <kind>
+  [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || die "'$1' is not an entry name"
   local parent
   parent="$(jq -r --arg k "$2" '.parents[$k] // empty' "$state_json")"
   [ -n "$parent" ] || die "no kind '$2' (state or data)"
@@ -412,16 +425,6 @@ active_units() {
     --type=service,socket,timer,path,mount,automount | awk '{ print $1 }' | sort
 }
 
-# Units and whatever needs them, all the way up (sockets, timers, paths,
-# services, mounts; not targets).
-needing() { # <unit>...
-  local u
-  for u in "$@"; do
-    echo "$u"
-    systemctl list-dependencies --reverse --all --plain --no-legend "$u" 2>/dev/null | awk '{ print $1 }'
-  done | grep -E '\.(service|socket|timer|path|mount|automount)$' | sort -u || true
-}
-
 # Blocked units refuse to start (an assertion in a drop-in) while the entry's
 # record of them exists; unblock removes both.  Blocking again adds to what
 # is blocked.  The boot is recorded with it: a block does not outlive one.
@@ -471,41 +474,94 @@ still_stopped() { # <entry>
   done < <(running_units_of "$1")
 }
 
+# Units and whatever needs them, all the way up: what requires, binds to,
+# is part of, requisites or is triggered by them (not through targets, which
+# everything is reachable from).
+needing() { # <unit>...
+  local u v
+  local -A seen=()
+  local -a queue=("$@")
+  while [ "${#queue[@]}" -gt 0 ]; do
+    u="${queue[0]}"
+    queue=("${queue[@]:1}")
+    if [ -z "$u" ] || [ -n "${seen[$u]:-}" ]; then continue; fi
+    seen[$u]=1
+    case "$u" in
+      *.target | *.slice | *.scope | *.device) continue ;;
+    esac
+    echo "$u"
+    for v in $(systemctl show --value -p RequiredBy -p BoundBy -p ConsistsOf -p RequisiteOf -p TriggeredBy "$u" 2>/dev/null); do
+      queue+=("$v")
+    done
+  done | sort -u
+}
+
+# Of a list of units on stdin, those that can be started again: with a unit
+# file, and not an instance an Accept=yes socket of the entry spawns (they
+# come with a connection).
+restartable() { # <entry>
+  local u p skip
+  local -a spawned=()
+  while IFS= read -r u; do
+    if [[ $u == *.socket ]] && [ "$(systemctl show -P Accept "$u")" = yes ]; then
+      spawned+=("${u%.socket}@")
+    fi
+  done < <(triggers_of "$1")
+  while IFS= read -r u; do
+    [ -n "$u" ] || continue
+    skip=0
+    for p in "${spawned[@]}"; do
+      if [[ $u == "$p"*.service ]]; then skip=1; fi
+    done
+    if [ "$skip" = 0 ] && [ -n "$(systemctl show -P FragmentPath "$u")" ]; then
+      echo "$u"
+    fi
+  done
+}
+
+# add_record <entry> <file>: units added to what the entry has to start again.
+add_record() {
+  { cat "$2"; cat "$records/$1.stopped" 2>/dev/null || true; } |
+    awk 'NF && !seen[$0]++' >"$records/$1.stopped.new"
+  mv "$records/$1.stopped.new" "$records/$1.stopped"
+}
+
 # quiesce [--unmount] <entry>...: nothing uses the entries any more.  Their
-# units and triggers (and with --unmount their mounts) are blocked until
+# units, triggers (and with --unmount their mounts) are blocked until
 # resume, so that no dependency, timer or activation starts them meanwhile;
-# the triggers are stopped, then the units running by then, then with
-# --unmount the mounts (nested entries go along).  Of the units these are
-# and of what needs them, whatever stopped is recorded for resume, added to
-# what an earlier quiesce recorded.
+# the triggers are stopped, then the units running by then, then the mounts
+# (nested entries go along).  Each entry records what of its own scope (its
+# units, triggers, mount and what needs them) stopped: at first all of it
+# that is active (so that a failure halfway leaves enough to resume), at
+# the end what actually stopped, both added to what was recorded before.
 quiesce() {
-  local unmount=0 name before scope
+  local unmount=0 name m
   if [ "$1" = --unmount ]; then
     unmount=1
     shift
   fi
-  local -a units=() triggers=() running=() mounts=()
+  local -a units=() triggers=() running=() mounts=() own=()
+  mkdir -p "$records"
   for name in "$@"; do
+    mapfile -t own < <(triggers_of "$name"; running_units_of "$name")
+    m=""
+    if [ "$unmount" = 1 ]; then
+      m="$(mount_unit "$(field "$name" path)")"
+      mounts+=("$m")
+      own+=("$m")
+    fi
     mapfile -t -O "${#triggers[@]}" triggers < <(triggers_of "$name")
-    mapfile -t -O "${#running[@]}" running < <(running_units_of "$name")
-    if [ "$unmount" = 1 ]; then
-      mounts+=("$(mount_unit "$(field "$name" path)")")
-    fi
-  done
-  scope="$(needing "${triggers[@]}" "${running[@]}" "${mounts[@]}")"
-  before="$(comm -12 <(active_units) <(echo "$scope"))"
-  for name in "$@"; do
+    needing "${own[@]}" | comm -12 <(active_units) - | restartable "$name" >"$scratch/before.$name"
+    cp "$records/$name.stopped" "$scratch/prior.$name" 2>/dev/null || : >"$scratch/prior.$name"
+    add_record "$name" "$scratch/before.$name"
     mapfile -t units < <(declared_units "$name"; triggers_of "$name")
-    if [ "$unmount" = 1 ]; then
-      units+=("$(mount_unit "$(field "$name" path)")")
-    fi
+    if [ -n "$m" ]; then units+=("$m"); fi
     block "$name" "${units[@]}"
   done
   if [ "${#triggers[@]}" -gt 0 ]; then
     systemctl stop "${triggers[@]}"
   fi
   # the instances running now that their sockets are stopped
-  running=()
   for name in "$@"; do
     mapfile -t -O "${#running[@]}" running < <(running_units_of "$name")
   done
@@ -515,76 +571,44 @@ quiesce() {
   fi
   if [ "${#mounts[@]}" -gt 0 ]; then
     if ! systemctl stop "${mounts[@]}"; then
-      record_stopped "$before" "$@"
       resume "$@"
       die "could not unmount ${mounts[*]}"
     fi
     for name in "$@"; do
       if mountpoint -q "$(field "$name" path)"; then
-        record_stopped "$before" "$@"
         resume "$@"
         die "$name: $(field "$name" path) is still mounted"
       fi
     done
   fi
-  record_stopped "$before" "$@"
-}
-
-# Of what was active before, what is not now and can be started again: units
-# with a unit file, but not the instances an Accept=yes socket spawns (they
-# come with a connection).  Added to each entry's record.
-record_stopped() { # <active before> <entry>...
-  local before="$1" name u
-  shift
-  local -a spawned=() stopped=()
   for name in "$@"; do
-    while IFS= read -r u; do
-      if [[ $u == *.socket ]] && [ "$(systemctl show -P Accept "$u")" = yes ]; then
-        spawned+=("${u%.socket}@")
-      fi
-    done < <(triggers_of "$name")
-  done
-  while IFS= read -r u; do
-    [ -n "$u" ] || continue
-    local p skip=0
-    for p in "${spawned[@]}"; do
-      if [[ $u == "$p"*.service ]]; then skip=1; fi
-    done
-    if [ "$skip" = 0 ] && [ -n "$(systemctl show -P FragmentPath "$u")" ]; then
-      stopped+=("$u")
-    fi
-  done < <(comm -23 <(echo "$before") <(active_units))
-  for name in "$@"; do
-    { printf '%s\n' "${stopped[@]}"; cat "$records/$name.stopped" 2>/dev/null || true; } |
-      awk 'NF && !seen[$0]++' >"$records/$name.stopped.new"
-    mv "$records/$name.stopped.new" "$records/$name.stopped"
+    cp "$scratch/prior.$name" "$records/$name.stopped"
+    comm -23 <(sort "$scratch/before.$name") <(active_units) >"$scratch/stopped.$name"
+    add_record "$name" "$scratch/stopped.$name"
   done
 }
 
 # resume [--mounts-only] <entry>...: what quiesce stopped, started again, and
 # the blocks lifted; with --mounts-only just the mounts, the rest stays
-# stopped and blocked for a later resume.  Units that other entries still
-# block are left to their resume.
+# stopped and blocked for a later resume.  What another entry still blocks,
+# or what needs that, is handed to that entry's record instead.
 resume() {
-  local only=0 name f
+  local only=0 name other u
   if [ "$1" = --mounts-only ]; then
     only=1
     shift
   fi
-  local -a units=()
+  local -a units=() held=()
   for name in "$@"; do
     if [ -f "$records/$name.stopped" ]; then
       mapfile -t -O "${#units[@]}" units <"$records/$name.stopped"
     fi
   done
-  if [ "$only" = 0 ]; then
-    unblock "$@"
-    for name in "$@"; do
-      rm -f "$records/$name.stopped"
-    done
-  else
+  printf '%s\n' "${units[@]}" | awk 'NF && !seen[$0]++' >"$scratch/resume"
+  if [ "$only" = 1 ]; then
+    grep '\.mount$' "$scratch/resume" >"$scratch/resume.new" || true
+    mv "$scratch/resume.new" "$scratch/resume"
     # the mounts are let go of now; the rest stays blocked
-    local u
     for name in "$@"; do
       if [ -f "$records/$name.blocked" ]; then
         while IFS= read -r u; do
@@ -596,19 +620,25 @@ resume() {
       fi
     done
     systemctl daemon-reload
+  else
+    unblock "$@"
+    for name in "$@"; do
+      rm -f "$records/$name.stopped"
+    done
   fi
-  {
-    printf '%s\n' "${units[@]}" | awk 'NF && !seen[$0]++'
-  } >"$scratch/resume"
-  if [ "$only" = 1 ]; then
-    grep '\.mount$' "$scratch/resume" >"$scratch/resume.new" || true
-    mv "$scratch/resume.new" "$scratch/resume"
-  fi
-  # what other entries still block
-  for f in "$records"/*.blocked; do
-    if [ -f "$f" ]; then cat "$f"; fi
-  done | sort -u >"$scratch/blocked"
-  mapfile -t units < <(grep -vxF -f "$scratch/blocked" "$scratch/resume" || true)
+  # what other entries still block waits for them
+  for other in "$records"/*.blocked; do
+    [ -f "$other" ] || continue
+    other="$(basename "$other" .blocked)"
+    mapfile -t held < "$records/$other.blocked"
+    needing "${held[@]}" | comm -12 <(sort "$scratch/resume") - >"$scratch/held"
+    if [ -s "$scratch/held" ]; then
+      add_record "$other" "$scratch/held"
+      grep -vxF -f "$scratch/held" "$scratch/resume" >"$scratch/resume.new" || true
+      mv "$scratch/resume.new" "$scratch/resume"
+    fi
+  done
+  mapfile -t units <"$scratch/resume"
   if [ "${#units[@]}" -gt 0 ]; then
     log "starting ${units[*]}"
     # a few swaps in a row would hit the mounts' start limit
@@ -651,7 +681,7 @@ cmd_start() {
 # current one (if any) is kept aside.  Nothing uses the entry meanwhile, and
 # no signal ends the swap halfway; if it fails, the current one is put back
 # and what stopped started again.
-swap_name="" swap_loc="" swap_aside="" swap_done=0 swap_resumed=0
+swap_name="" swap_loc="" swap_aside="" swap_done=0 swap_resumed=0 swap_start=1
 swap_in() {
   local start=1
   if [ "$1" = --no-start ]; then
@@ -662,11 +692,11 @@ swap_in() {
   location_exists "$new" || die "no $new"
   swap_name="$name"
   swap_loc="$(field "$name" location)"
-  swap_aside="" swap_done=0 swap_resumed=0
+  swap_aside="" swap_done=0 swap_resumed=0 swap_start="$start"
 
   critical
-  quiesce --unmount "$name"
   cleanups+=("swap_recover")
+  quiesce --unmount "$name"
   swap_lock
   if location_exists "$swap_loc"; then
     swap_aside="$(aside_name "$swap_loc")"
@@ -700,7 +730,12 @@ swap_recover() {
   fi
   swap_unlock
   if [ "$swap_resumed" = 0 ]; then
-    resume "$swap_name"
+    swap_resumed=1
+    if [ "$swap_start" = 1 ]; then
+      resume "$swap_name"
+    else
+      resume --mounts-only "$swap_name"
+    fi
   fi
 }
 
@@ -913,8 +948,10 @@ restore_root() { # <profile> <id> <directory>
     return 0
   fi
   IFS=: read -r _ uid gid mode <<<"$root"
+  [[ $uid =~ ^[0-9]+$ && $gid =~ ^[0-9]+$ && $mode =~ ^[0-7]{3,4}$ ]] || die "the backup's fleet-root tag is malformed: $root"
   chown "$uid:$gid" "$3"
-  chmod "$mode" "$3"
+  # five digits, so that chmod also clears set-id bits the mode does not have
+  chmod "$(printf '%05d' "$((10#$mode))")" "$3"
 }
 
 cmd_restore() {
@@ -1071,6 +1108,10 @@ take_access() {
   json="$(cat "$dir/repository.json")"
   jq -e '[paths | map(tostring) | .[] | test("command|hook"; "i")] | any | not' <<<"$json" >/dev/null ||
     die "the repository settings carry commands or hooks; not using them"
+  # a local path, OpenDAL or a REST server; not rclone, which can run commands
+  jq -e '.repository | type == "string" and test("^(/|opendal:|rest:)")' <<<"$json" >/dev/null ||
+    die "the repository is of a kind fleet-state does not hand to another host"
+  jq -e '[.. | select(. == null)] | length == 0' <<<"$json" >/dev/null || die "the repository settings hold nulls"
   while IFS=$'\t' read -r name path; do
     [[ $name =~ ^[A-Za-z0-9_-]+$ ]] && [ -f "$dir/files/$name" ] || die "the access lacks $name"
     json="$(jq --arg p "$path" --arg n "$dir/files/$name" 'walk(if . == $p then $n else . end)' <<<"$json")"
@@ -1216,12 +1257,18 @@ place() {
   else
     swap_lock
     critical
+    aside=""
     if location_exists "$loc"; then
       aside="$(aside_name "$loc")"
       rename_location "$loc" "$aside"
       log "$name: what was there is kept aside as $aside"
     fi
-    rename_location "$incoming" "$loc"
+    if ! rename_location "$incoming" "$loc"; then
+      if [ -n "$aside" ]; then rename_location "$aside" "$loc"; fi
+      swap_unlock
+      uncritical
+      die "$name: could not put $incoming in place; left as it was"
+    fi
     swap_unlock
     uncritical
     if has_entry "$name"; then

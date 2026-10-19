@@ -276,15 +276,17 @@ Three things live under `nixos/` besides hosts, and they are easy to mix up:
   it in: the entry's units, triggers and mount are blocked from starting
   and stopped, along with whatever needs them, the current dataset or
   subvolume is renamed aside (`<location>.aside-<time>`) and the restored
-  one takes its name; then what stopped is started again. No signal and no
-  lost connection ends a swap halfway, and a swap that fails puts the
-  entry back as it was. An entry mounted inside another stays as it is.
+  one takes its name; then what stopped is started again. A lost
+  connection does not end a swap, a signal ends it only once it is done,
+  and a swap that fails puts the entry back as it was. An entry mounted inside another stays as it is.
   `fleetl state rollback` swaps a copy kept aside back in (the current one
   goes aside in turn), `fleetl state discard` destroys one, `fleetl state
   list` shows them. `stop` and `start` do the unit part alone: a stopped
   entry's units refuse to start until `start` (a drop-in in `/run`, so a
   reboot lifts it, as does a deploy without the entry), and `start` starts
-  what `stop` stopped, however often it was stopped. Datasets and
+  what `stop` stopped, however often it was stopped; what another stopped
+  entry still holds (a unit two entries share, a service needing a unit of
+  the other) starts with that entry. Datasets and
   subvolumes below an entry are not part of its snapshots: backups warn
   about them, moves refuse, nothing destroys them.
 - **Moving a service** with its state is one command, then a commit and two
@@ -329,7 +331,8 @@ Three things live under `nixos/` besides hosts, and they are easy to mix up:
   its repository settings as data (the `[repository]` table, never a
   profile: settings carrying commands or hooks are refused), the host name
   its backups are recorded under, and the files they read
-  (`fleet.backup.passwordFile`, `credentialFiles`); the target writes its
+  (`fleet.backup.passwordFile`, `credentialFiles`); only a local path, an
+  `opendal:` or a `rest:` repository is handed over; the target writes its
   own profile pointing into a `0700` directory in `/run`, restores with no
   rustic cache, and removes the directory. The credentials pass the
   admin's machine in the pipe, and while the restore runs the target's root
