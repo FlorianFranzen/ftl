@@ -11,6 +11,9 @@
 #                                       run the host's generators whose files are missing
 #   fleetl host install <name> <target> [--disk-key] [-- <nixos-anywhere args>]
 #                                       install a host with its identity in place
+#   fleetl host exec <name>|all [--user <u>] [--] <command...>
+#                                       run a command on a host (all: every host that
+#                                       is not ignored), pinned to its ssh.pub
 #   fleetl host show <name>             a host: services, users, layers, keys, stores
 #   fleetl service show <name>          a service: hosts, roles, layers, data, store
 #   fleetl user init <name> [--admin] [--ssh-key <file>] [--pgp <fpr>] [--age <recipient>]
@@ -399,6 +402,60 @@ host_install() {
   nixos-anywhere "${args[@]}" "$@"
 }
 
+# A command on one host, or on every host that is not ignored, one after the
+# other.  The address and the login are those of the deploy output when the
+# repository has one (mkDeploy: `address`, `sshUser`), else the host's fqdn or
+# name and root; the connection is pinned to the host's ssh.pub like a deploy.
+# FLEETL_SSH replaces the ssh program (tests).
+host_exec() {
+  in_repo
+  local name="${1:?usage: fleetl host exec <name>|all [--user <u>] [--] <command...>}"
+  shift
+  local user=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --user) user="${2:?--user needs a name}"; shift 2 ;;
+      --) shift; break ;;
+      -*) usage ;;
+      *) break ;;
+    esac
+  done
+  [ $# -gt 0 ] || die "host exec: no command given"
+
+  local hosts
+  hosts="$(fleet_json hosts)"
+  local -a names
+  if [ "$name" = all ]; then
+    mapfile -t names < <(jq -r 'to_entries[] | select(.value.importance != "ignored") | .key' <<<"$hosts")
+  else
+    jq -e --arg h "$name" 'has($h)' <<<"$hosts" >/dev/null || die "no host '$name'"
+    names=("$name")
+  fi
+  [ -n "$user" ] || user="$(nix eval --raw .#deploy.sshUser 2>/dev/null || echo root)"
+
+  local h address key status=0
+  for h in "${names[@]}"; do
+    address="$(nix eval --raw ".#deploy.nodes.\"$h\".hostname" 2>/dev/null || jq -r --arg h "$h" '.[$h].fqdn // $h' <<<"$hosts")"
+    key="$(jq -r --arg h "$h" '.[$h].keys.ssh // empty' <<<"$hosts")"
+    local -a opts=()
+    if [ -n "$key" ]; then
+      echo "$h $key" >"$tmp/known_hosts.$h"
+      opts=(-o "HostKeyAlias=$h" -o "UserKnownHostsFile=$tmp/known_hosts.$h" -o StrictHostKeyChecking=yes)
+    else
+      echo "fleetl: $h has no ssh.pub, trusting your known_hosts" >&2
+    fi
+    if [ "$name" = all ]; then
+      echo "== $h ($user@$address)" >&2
+    fi
+    "${FLEETL_SSH:-ssh}" "${opts[@]}" "$user@$address" -- "$@" || {
+      status=$?
+      [ "$name" = all ] || exit "$status"
+      echo "fleetl: $h: exit $status" >&2
+    }
+  done
+  exit "$status"
+}
+
 # --- user ----------------------------------------------------------------------
 
 user_init() {
@@ -466,6 +523,7 @@ case "${1:-}" in
       init) shift 2; host_init "$@" ;;
       generate) shift 2; host_generate "$@" ;;
       install) shift 2; host_install "$@" ;;
+      exec) shift 2; host_exec "$@" ;;
       show) show hosts "${3:?usage: fleetl host show <name>}" ;;
       *) usage ;;
     esac

@@ -137,6 +137,9 @@ each library function and module reads, provides and does.
   fleetl host generate <name>     the host's generators whose files are missing
   fleetl host install <name> <target> [--disk-key] [-- <nixos-anywhere args>]
                                   nixos-anywhere with the identity in place
+  fleetl host exec <name>|all [--user <u>] [--] <command...>
+                                  a command on a host, or on every host that is
+                                  not ignored, pinned to its ssh.pub
   fleetl host show | service show | user show <name>
   fleetl user init <name> [--admin] [--ssh-key <file>] [--pgp <fpr>] [--age <recipient>]
   ```
@@ -332,7 +335,9 @@ see whether the library still works with the channel's current head:
   homes in hosts, `static` everywhere, manifest, per-system checks,
   pass-through, renamed folders);
 - `cli`: the fixture's `.sops.yaml` is what `fleetl secrets render` makes of
-  its layout (the `fleet-sops` check);
+  its layout (the `fleet-sops` check); `fleetl host exec` runs on stubs and
+  reaches each host with the deploy output's address and login, pinned to
+  its `ssh.pub`;
 - VM tests:
   - `modules`: a `mkFlake` host with every ftl module enabled;
   - `state-btrfs`, `state-zfs`: `fleet.state` on an empty disk, then a

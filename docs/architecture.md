@@ -255,7 +255,10 @@ arguments; stores need `root`.
   places public files, re-renders `.sops.yaml`, and writes secrets into the
   stores (a new store in one `sops --encrypt`; an existing one with `sops set`,
   which needs the admin's key); `host install` unpacks `identity.yaml` for
-  nixos-anywhere. Temporary directories are `0700` and removed on return.
+  nixos-anywhere; `host exec` runs a command on a host (or on every host that
+  is not ignored) at the deploy output's address and login (else the host's
+  `fqdn` or name, and root), pinned to its `ssh.pub` the way `mkDeploy` pins
+  deploys. Temporary directories are `0700` and removed on any exit.
 - `ftl-layers.sh` (hosts): environment from `modules/layers.nix`
   (`FTL_REPO_URL`, `FTL_LAYERS`, `FTL_STATE_DIR`, `FTL_PROFILE_DIR`,
   `FTL_VERIFY_MODE`, ...); installs each layer's `nixosLayers.<sys>.<l>` at
