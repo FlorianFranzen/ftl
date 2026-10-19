@@ -9,6 +9,7 @@
 #                                       new host folder, its generators run
 #   fleetl host generate <name> [--force] [<generator>...]
 #                                       run the host's generators whose files are missing
+#                                       (their inputs first, fleet generators included)
 #   fleetl host install <name> <target> [--disk-key] [-- <nixos-anywhere args>]
 #                                       install a host with its identity in place
 #   fleetl host exec <name>|all [--user <u>] [--] <command...>
@@ -16,6 +17,9 @@
 #                                       is not ignored), pinned to its ssh.pub
 #   fleetl host show <name>             a host: services, users, layers, keys, stores
 #   fleetl service show <name>          a service: hosts, roles, layers, data, store
+#   fleetl fleet generate [--force] [<generator>...]
+#                                       run the fleet's generators whose files are missing
+#   fleetl fleet show                   the fleet: hosts, services, users, keys, stores
 #   fleetl user init <name> [--admin] [--ssh-key <file>] [--pgp <fpr>] [--age <recipient>]
 #                                       new user folder from the agent's keys
 #   fleetl user show <name>
@@ -236,20 +240,176 @@ host_init() {
   echo "created $dir; next: its modules, then fleetl secrets edit $dir/secrets.yaml"
 }
 
+# --- generators ----------------------------------------------------------------
+
+# Where a scope keeps its files: a host's next to its host.nix, the fleet's
+# in nixos/.  Secrets go to the scope's secrets.yaml (as <generator>/<file>)
+# or identity.yaml (as <file>).
+scope_dir() { # <scope>
+  if [ "$1" = fleet ]; then echo nixos; else echo "nixos/hosts/$host"; fi
+}
+
 # Is a secret of a generator in a store already?  sops leaves the keys of a
 # store in the clear, only the values are encrypted.
 has_secret() { # <store file> <yq path>
   [ -f "$1" ] && yq -e "$2" "$1" >/dev/null 2>&1
 }
 
+has_file() { # <dir> <generator> <file> <secret> <store>
+  if [ "$4" = true ]; then
+    if [ "$5" = identity ]; then
+      has_secret "$1/identity.yaml" ".[\"$3\"]"
+    else
+      has_secret "$1/secrets.yaml" ".[\"$2\"][\"$3\"]"
+    fi
+  else
+    [ -e "$1/$3" ]
+  fi
+}
+
+# A file of a generator for an input of another: generated this run, else
+# from the repository (a public file as is, a secret decrypted from its store,
+# which needs the admin's key).
+materialize() { # <generator> <file> <destination>
+  local spec scope sdir secret st
+  spec="$(jq --arg g "$1" '.[$g]' <<<"$gens")"
+  scope="$(jq -r '.scope' <<<"$spec")"
+  sdir="$(scope_dir "$scope")"
+  secret="$(jq -r --arg f "$2" '.files[$f].secret // false' <<<"$spec")"
+  st="$(jq -r --arg f "$2" '.files[$f].store // "secrets"' <<<"$spec")"
+  install -d -m 700 "$(dirname "$3")"
+  if [ -e "$tmp/$scope/$1/$2" ]; then
+    cp "$tmp/$scope/$1/$2" "$3"
+  elif [ "$secret" != true ]; then
+    cp "$sdir/$2" "$3"
+  elif [ "$st" = identity ]; then
+    (umask 077; sops decrypt --extract "[\"$2\"]" "$sdir/identity.yaml" >"$3") ||
+      die "could not read $1/$2 from $sdir/identity.yaml (needs your key)"
+  else
+    (umask 077; sops decrypt --extract "[\"$1\"][\"$2\"]" "$sdir/secrets.yaml" >"$3") ||
+      die "could not read $1/$2 from $sdir/secrets.yaml (needs your key)"
+  fi
+}
+
+# Run a generator for the host (`$host`), or for the fleet when it is
+# fleet-scoped, unless its files are all there; its inputs come first, made
+# now if missing.  Public files land in the scope's directory right away; the
+# secrets wait in $tmp/<scope>/<generator> for write_stores.  `seen` remembers
+# what was looked at, `ran` what ran (as <scope>/<generator>), `written` the
+# public files.
+ensure() { # <generator> <force>
+  local gen="$1" force="$2" spec scope sdir label f secret st
+  spec="$(jq -e --arg g "$gen" '.[$g]' <<<"$gens")" || die "no generator '$gen'"
+  scope="$(jq -r '.scope' <<<"$spec")"
+  if [ "$scope" = fleet ]; then
+    label="the fleet"
+  else
+    [ -n "$host" ] || die "'$gen' is a host's generator: fleetl host generate <host> $gen"
+    label="$host"
+  fi
+  sdir="$(scope_dir "$scope")"
+  [ -d "$sdir" ] || die "no $sdir"
+  case " ${seen[*]:-} " in *" $scope/$gen "*) return 0 ;; esac
+  seen+=("$scope/$gen")
+
+  if [ "$force" = 0 ]; then
+    local missing=0
+    while IFS=$'\t' read -r f secret st; do
+      has_file "$sdir" "$gen" "$f" "$secret" "$st" || missing=1
+    done < <(jq -r '.files | to_entries[] | [.key, (.value.secret // false | tostring), (.value.store // "secrets")] | @tsv' <<<"$spec")
+    if [ "$missing" = 0 ]; then
+      echo "$gen: $label has its files"
+      return 0
+    fi
+  fi
+
+  local input
+  mkdir -p "$tmp/in/$gen"
+  while IFS= read -r input; do
+    [ -n "$input" ] || continue
+    ensure "${input%%/*}" 0
+    materialize "${input%%/*}" "${input#*/}" "$tmp/in/$gen/$input"
+  done < <(jq -r '.inputs[]' <<<"$spec")
+
+  echo "$gen: generating for $label"
+  mkdir -p "$tmp/$scope/$gen"
+  HOST="${host:-fleet}" nix run ".#generate-$gen" -- "$tmp/$scope/$gen" "$tmp/in/$gen"
+  while IFS= read -r f; do
+    install -m 644 "$tmp/$scope/$gen/$f" "$sdir/$f"
+    written+=("$sdir/$f")
+  done < <(jq -r '.files | to_entries[] | select(.value.secret != true) | .key' <<<"$spec")
+  ran+=("$scope/$gen")
+}
+
+# The secrets of what ran for a scope, into its stores: all at once into a
+# new store (no key needed), one by one into an existing one (the admin's).
+write_stores() { # <scope>
+  local scope="$1" sdir store path doc gen spec f
+  sdir="$(scope_dir "$scope")"
+  for store in secrets identity; do
+    path="$sdir/$store.yaml"
+    doc="$tmp/$scope-$store.yaml"
+    : >"$doc"
+    local -a keys=() files=()
+    for gen in "${ran[@]}"; do
+      [ "${gen%%/*}" = "$scope" ] || continue
+      gen="${gen#*/}"
+      spec="$(jq --arg g "$gen" '.[$g]' <<<"$gens")"
+      while IFS= read -r f; do
+        if [ "$store" = identity ]; then
+          F="$f" V="$(cat "$tmp/$scope/$gen/$f")" yq -i '.[strenv(F)] = strenv(V)' "$doc"
+          keys+=("[\"$f\"]")
+        else
+          G="$gen" F="$f" V="$(cat "$tmp/$scope/$gen/$f")" yq -i '.[strenv(G)][strenv(F)] = strenv(V)' "$doc"
+          keys+=("[\"$gen\"][\"$f\"]")
+        fi
+        files+=("$tmp/$scope/$gen/$f")
+      done < <(jq -r --arg s "$store" \
+        '.files | to_entries[] | select(.value.secret == true and (.value.store // "secrets") == $s) | .key' <<<"$spec")
+    done
+    [ "${#keys[@]}" = 0 ] && continue
+    if [ -f "$path" ]; then
+      echo "$path: adding ${#keys[@]} secret(s) (needs your key)"
+      local i
+      for i in "${!keys[@]}"; do
+        sops set "$path" "${keys[$i]}" "$(jq -Rs . <"${files[$i]}")" ||
+          die "could not add ${keys[$i]} to $path"
+      done
+    else
+      echo "$path: written"
+      sops --encrypt --filename-override "$path" --output "$path" "$doc"
+      git add -N "$path"
+    fi
+  done
+}
+
+# The generators named, with their inputs, and the stores after them
+# (globals: host, gens, force).
+generate() { # <generator>...
+  local -a seen=() ran=() written=()
+  local gen
+  for gen in "$@"; do
+    ensure "$gen" "$force"
+  done
+  [ "${#ran[@]}" = 0 ] && return 0
+
+  # the public files may have made a host a recipient (of its own store, of
+  # its services', of the fleet's); the rules follow here, the re-keying of
+  # existing stores is `fleetl secrets sync`, which needs the admin's key
+  git add -N "${written[@]}"
+  fleet_json sops | secrets_render >"$tmp/sops.yaml"
+  install -m 644 "$tmp/sops.yaml" .sops.yaml
+
+  write_stores fleet
+  [ -n "$host" ] && write_stores host
+  return 0
+}
+
 # Run the host's generators whose files are missing (or the ones named;
-# --force runs them again).  Public files land next to host.nix, secret ones
-# in secrets.yaml (as <generator>/<file>) or identity.yaml (as <file>).  A
-# store that does not exist yet is written once for everything generated, so
-# a fresh host needs no key of the admin's; adding to an existing store does.
+# --force runs them again), their inputs first.
 host_generate() {
   in_repo
-  local name="${1:?usage: fleetl host generate <name> [--force] [<generator>...]}" force=0
+  local host="${1:?usage: fleetl host generate <name> [--force] [<generator>...]}" force=0
   shift
   local -a wanted=()
   while [ $# -gt 0 ]; do
@@ -259,94 +419,62 @@ host_generate() {
       *) wanted+=("$1"); shift ;;
     esac
   done
-  local dir="nixos/hosts/$name"
-  [ -d "$dir" ] || die "no $dir"
-  local host gens
-  host="$(fleet_json "hosts.$name")" || die "no host $name"
+  [ -d "nixos/hosts/$host" ] || die "no nixos/hosts/$host"
+  local gens
   gens="$(fleet_json generators)"
   if [ "${#wanted[@]}" = 0 ]; then
-    mapfile -t wanted < <(jq -r '.generators[]' <<<"$host")
+    mapfile -t wanted < <(fleet_json "hosts.$host" | jq -r '.generators[]')
   fi
-
-
-  # 1. run what is missing; public files go next to host.nix right away
-  local gen spec f secret st
-  local -a ran=()
+  local gen
   for gen in "${wanted[@]}"; do
-    spec="$(jq -e --arg g "$gen" '.[$g]' <<<"$gens")" || die "no generator '$gen'"
-
-    if [ "$force" = 0 ]; then
-      local missing=0
-      while IFS=$'\t' read -r f secret st; do
-        if [ "$secret" = true ]; then
-          if [ "$st" = identity ]; then
-            has_secret "$dir/identity.yaml" ".[\"$f\"]" || missing=1
-          else
-            has_secret "$dir/secrets.yaml" ".[\"$gen\"][\"$f\"]" || missing=1
-          fi
-        else
-          [ -e "$dir/$f" ] || missing=1
-        fi
-      done < <(jq -r '.files | to_entries[] | [.key, (.value.secret // false | tostring), (.value.store // "secrets")] | @tsv' <<<"$spec")
-      if [ "$missing" = 0 ]; then
-        echo "$gen: $name has its files"
-        continue
-      fi
-    fi
-
-    echo "$gen: generating for $name"
-    mkdir -p "$tmp/$gen"
-    HOST="$name" nix run ".#generate-$gen" -- "$tmp/$gen"
-    while IFS= read -r f; do
-      install -m 644 "$tmp/$gen/$f" "$dir/$f"
-    done < <(jq -r '.files | to_entries[] | select(.value.secret != true) | .key' <<<"$spec")
-    ran+=("$gen")
-  done
-  [ "${#ran[@]}" = 0 ] && return 0
-
-  # the public files may have made the host a recipient (of its own store,
-  # and of its services'); the rules follow here, the re-keying of existing
-  # stores is `fleetl secrets sync`, which needs the admin's key
-  git add -N "$dir"
-  fleet_json sops | secrets_render >"$tmp/sops.yaml"
-  install -m 644 "$tmp/sops.yaml" .sops.yaml
-
-  # 2. the secret files, into the stores: all at once into a new store, one
-  #    by one into an existing one
-  local store path doc
-  for store in secrets identity; do
-    path="$dir/$store.yaml"
-    doc="$tmp/$store.yaml"
-    : >"$doc"
-    local -a keys=() files=()
-    for gen in "${ran[@]}"; do
-      spec="$(jq --arg g "$gen" '.[$g]' <<<"$gens")"
-      while IFS= read -r f; do
-        if [ "$store" = identity ]; then
-          F="$f" V="$(cat "$tmp/$gen/$f")" yq -i '.[strenv(F)] = strenv(V)' "$doc"
-          keys+=("[\"$f\"]")
-        else
-          G="$gen" F="$f" V="$(cat "$tmp/$gen/$f")" yq -i '.[strenv(G)][strenv(F)] = strenv(V)' "$doc"
-          keys+=("[\"$gen\"][\"$f\"]")
-        fi
-        files+=("$tmp/$gen/$f")
-      done < <(jq -r --arg s "$store" \
-        '.files | to_entries[] | select(.value.secret == true and (.value.store // "secrets") == $s) | .key' <<<"$spec")
-    done
-    [ "${#keys[@]}" = 0 ] && continue
-    if [ -f "$path" ]; then
-      echo "$store.yaml: adding ${#keys[@]} secret(s) (needs your key)"
-      local i
-      for i in "${!keys[@]}"; do
-        sops set "$path" "${keys[$i]}" "$(jq -Rs . <"${files[$i]}")" ||
-          die "could not add ${keys[$i]} to $path"
-      done
-    else
-      echo "$store.yaml: written"
-      sops --encrypt --filename-override "$path" --output "$path" "$doc"
-      git add -N "$path"
+    if jq -e --arg g "$gen" '.[$g].scope == "fleet"' <<<"$gens" >/dev/null; then
+      die "'$gen' is the fleet's generator: fleetl fleet generate $gen"
     fi
   done
+  generate "${wanted[@]}"
+}
+
+# The fleet's generators (scope = "fleet") the same way.
+fleet_generate() {
+  in_repo
+  local host="" force=0
+  local -a wanted=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --force) force=1; shift ;;
+      -*) usage ;;
+      *) wanted+=("$1"); shift ;;
+    esac
+  done
+  local gens
+  gens="$(fleet_json generators)"
+  if [ "${#wanted[@]}" = 0 ]; then
+    mapfile -t wanted < <(jq -r 'to_entries[] | select(.value.scope == "fleet") | .key' <<<"$gens")
+  fi
+  if [ "${#wanted[@]}" = 0 ]; then
+    echo "no fleet generators (scope = \"fleet\" in nixos/generators/)"
+    return 0
+  fi
+  generate "${wanted[@]}"
+}
+
+fleet_show() {
+  in_repo
+  local hosts services users keys gens
+  hosts="$(fleet_json hosts | jq -r 'keys | join(" ")')"
+  services="$(fleet_json services | jq -r 'keys | join(" ")')"
+  users="$(fleet_json users | jq -r 'keys | join(" ")')"
+  keys="$(fleet_json keys | jq -r 'to_entries[] | "    \(.key): \(.value)"')"
+  gens="$(fleet_json generators | jq -r '[to_entries[] | select(.value.scope == "fleet") | .key] | join(" ")')"
+  echo "fleet"
+  echo "  hosts: ${hosts:--}"
+  echo "  services: ${services:--}"
+  echo "  users: ${users:--}"
+  echo "  keys:"
+  [ -n "$keys" ] && echo "$keys"
+  echo "  generators: ${gens:--}"
+  echo "  stores:"
+  fleet_json sops | jq -r '.stores[] | select(.kind == "fleet" or .kind == "fleet-identity") | "    \(.path)"'
 }
 
 host_install() {
@@ -525,6 +653,13 @@ case "${1:-}" in
       install) shift 2; host_install "$@" ;;
       exec) shift 2; host_exec "$@" ;;
       show) show hosts "${3:?usage: fleetl host show <name>}" ;;
+      *) usage ;;
+    esac
+    ;;
+  fleet)
+    case "${2:-}" in
+      generate) shift 2; fleet_generate "$@" ;;
+      show) fleet_show ;;
       *) usage ;;
     esac
     ;;

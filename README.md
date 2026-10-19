@@ -89,6 +89,8 @@ each library function and module reads, provides and does.
 
   | store | readers |
   |---|---|
+  | `nixos/secrets.yaml` (the fleet's, shared by every host) | every host, the admins |
+  | `nixos/identity.yaml` (the fleet's private keys: a CA, …) | the admins |
   | `nixos/hosts/<h>/secrets.yaml` | the host, the admins |
   | `nixos/hosts/<h>/identity.yaml` (its private host keys, for installs) | the admins |
   | `nixos/services/<s>/secrets.yaml` | its hosts, the admins, the users listing the service |
@@ -101,16 +103,22 @@ each library function and module reads, provides and does.
   `fleetl secrets sync` writes `.sops.yaml` from it (`sops.extraRules` in
   `mkFlake` appends rules of your own). When the flake has a `sops-nix` input,
   its module is imported into every host and `fleet.secrets` points it at the
-  host's store and key; a service module reaches its own store as
-  `service.sopsFile`.
-- **Generators** make a host's keys. `nixos/generators/<name>.nix` is
-  `{ pkgs }: { files; script; runtimeInputs; }`: the script writes the `files`
-  into `$out`; public ones land next to `host.nix` (every `<name>.pub` there is
-  `fleet.hosts.<h>.keys.<name>`), secret ones go into `secrets.yaml` as
-  `<generator>/<file>` or, with `store = "identity"`, into `identity.yaml`.
-  `host.nix` lists the generators a host uses (`generators`; `host-keys`, the
-  SSH host and initrd keys, by default; `age-key` for a dedicated age key).
-  `fleetl host init` runs them, `fleetl host generate <host>` runs the ones
+  host's store and key (`file`) and at the fleet's shared store (`shared`); a
+  service module reaches its own store as `service.sopsFile`.
+- **Generators** make keys. `nixos/generators/<name>.nix` is
+  `{ pkgs }: { files; script; runtimeInputs; scope; inputs; }`: the script
+  writes the `files` into `$out`; public ones land next to `host.nix` (every
+  `<name>.pub` there is `fleet.hosts.<h>.keys.<name>`), secret ones go into
+  `secrets.yaml` as `<generator>/<file>` or, with `store = "identity"`, into
+  `identity.yaml`. `host.nix` lists the generators a host uses (`generators`;
+  `host-keys`, the SSH host and initrd keys, by default; `age-key` for a
+  dedicated age key). A generator with `scope = "fleet"` runs once for the
+  whole fleet instead: its files land in `nixos/` (every `nixos/<name>.pub`
+  is `fleet.keys.<name>`) and in the fleet's stores. `inputs` are files of
+  other generators it reads, as `<generator>/<file>` under `$in`: a
+  certificate signed by the fleet's CA, a key derived from the host's; what
+  is missing is made first. `fleetl host init` runs a host's generators,
+  `fleetl host generate <host>` and `fleetl fleet generate` run the ones
   whose files are missing later (`--force` for all of them), and
   `packages.<sys>.generate-<name>` is each one as a program.
 
@@ -141,6 +149,9 @@ each library function and module reads, provides and does.
                                   a command on a host, or on every host that is
                                   not ignored, pinned to its ssh.pub
   fleetl host show | service show | user show <name>
+  fleetl fleet generate [--force] [<generator>...]
+                                  the fleet's generators whose files are missing
+  fleetl fleet show               the fleet: hosts, services, users, keys, stores
   fleetl user init <name> [--admin] [--ssh-key <file>] [--pgp <fpr>] [--age <recipient>]
   ```
 
@@ -335,9 +346,10 @@ see whether the library still works with the channel's current head:
   homes in hosts, `static` everywhere, manifest, per-system checks,
   pass-through, renamed folders);
 - `cli`: the fixture's `.sops.yaml` is what `fleetl secrets render` makes of
-  its layout (the `fleet-sops` check); `fleetl host exec` runs on stubs and
-  reaches each host with the deploy output's address and login, pinned to
-  its `ssh.pub`;
+  its layout (the `fleet-sops` check); on stubs, `fleetl host exec` reaches
+  each host with the deploy output's address and login, pinned to its
+  `ssh.pub`, and `fleet generate` and `host generate` make a CA and a
+  certificate signed by it, inputs first, into the right stores;
 - VM tests:
   - `modules`: a `mkFlake` host with every ftl module enabled;
   - `state-btrfs`, `state-zfs`: `fleet.state` on an empty disk, then a

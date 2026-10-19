@@ -94,7 +94,10 @@ let
         data = builtins.removeAttrs spec reserved;
       };
       unknownLayers = lib.filter (l: !(ctx.layers' ? ${l})) (spec.layers or [ ]);
-      unknownGenerators = lib.filter (g: !(ctx.generatorFiles ? ${g})) host.generators;
+      unknownGenerators = lib.filter (g: !(ctx.generators ? ${g})) host.generators;
+      fleetGenerators = lib.filter (
+        g: ctx.generators ? ${g} && ctx.generators.${g}.scope == "fleet"
+      ) host.generators;
     in
     assert lib.assertMsg (
       !(spec ? name)
@@ -110,6 +113,8 @@ let
     assert lib.assertMsg (
       unknownGenerators == [ ]
     ) "ftl: host '${hostName}' uses undefined generators: ${toString unknownGenerators}";
+    assert lib.assertMsg (fleetGenerators == [ ])
+      "ftl: host '${hostName}' lists fleet generators (they run once, with `fleetl fleet generate`): ${toString fleetGenerators}";
     host;
 in
 rec {

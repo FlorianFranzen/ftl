@@ -174,6 +174,7 @@ check "flake-full" (
         names = [
           "generators"
           "hosts"
+          "keys"
           "manifest"
           "services"
           "sops"
@@ -189,6 +190,8 @@ check "flake-full" (
         "extra"
         "fleetl"
         "generate-age-key"
+        "generate-ca"
+        "generate-cert"
         "generate-host-keys"
         "generate-token"
         "hello-ftl"

@@ -158,10 +158,16 @@ check "unit-nixos" (
         identity = builtins.attrNames (
           lib.filterAttrs (_: f: f.store or "" == "identity") n.generators.host-keys.files
         );
+        # scope and inputs: a fleet generator runs once, a host generator may
+        # read fleet files and other host generators' files
+        scopes = lib.mapAttrs (_: g: g.scope) n.generators;
+        certInputs = n.generators.cert.inputs;
       };
       expected = {
         names = [
           "age-key"
+          "ca"
+          "cert"
           "host-keys"
           "token"
         ];
@@ -173,15 +179,85 @@ check "unit-nixos" (
           "initrd_ssh_host_ed25519_key"
           "ssh_host_ed25519_key"
         ];
+        scopes = {
+          age-key = "host";
+          ca = "fleet";
+          cert = "host";
+          host-keys = "host";
+          token = "host";
+        };
+        certInputs = [
+          "ca/ca.pub"
+          "ca/ca.key"
+          "host-keys/ssh.pub"
+        ];
       };
     };
     testUndefinedGenerator = {
       expr =
-        !(builtins.tryEval (builtins.attrNames (ftl.lib.mkNixos {
-          inherit nixpkgs;
-          hosts.delta.generators = [ "nope" ];
-        }).hosts)).success;
+        !(builtins.tryEval (
+          builtins.attrNames
+            (ftl.lib.mkNixos {
+              inherit nixpkgs;
+              hosts.delta.generators = [ "nope" ];
+            }).hosts
+        )).success;
       expected = true;
+    };
+    # a host lists host generators only; the fleet's run once
+    testFleetGeneratorOnHost = {
+      expr =
+        !(builtins.tryEval (
+          builtins.attrNames
+            (ftl.lib.mkNixos {
+              inherit nixpkgs;
+              src = fixture + "/nixos";
+              hosts.alpha.generators = [ "ca" ];
+            }).hosts
+        )).success;
+      expected = true;
+    };
+    # inputs must exist, be declared, not loop, and a fleet generator reads
+    # no host's files
+    testGeneratorInputs = {
+      expr =
+        let
+          g =
+            (ftl.lib.mkNixos {
+              inherit nixpkgs;
+              src = ./../fixtures/generators/nixos;
+            }).generators;
+          ok = name: (builtins.tryEval (builtins.deepSeq g.${name} true)).success;
+        in
+        lib.genAttrs [
+          "fine"
+          "loop"
+          "orphan"
+          "undeclared"
+          "fleet-of-host"
+          "cycle-a"
+          "cycle-b"
+        ] ok;
+      expected = {
+        fine = true;
+        loop = false;
+        orphan = false;
+        undeclared = false;
+        fleet-of-host = false;
+        cycle-a = false;
+        cycle-b = false;
+      };
+    };
+    # the fleet's own public files, nixos/<name>.pub
+    testFleetKeys = {
+      expr = {
+        out = n.keys;
+        arg = (cfg "alpha")._module.args.fleet.keys or n.fleet.keys;
+      };
+      expected = {
+        out.example = "example-public-value";
+        arg.example = "example-public-value";
+      };
     };
 
     # service.nix is metadata: hosts (or roles), layers, free-form data
@@ -436,6 +512,16 @@ check "unit-nixos" (
             r = r [ alice ] [ ];
           }
           {
+            path = "nixos/identity.yaml";
+            kind = "fleet-identity";
+            r = r [ alice ] [ ];
+          }
+          {
+            path = "nixos/secrets.yaml";
+            kind = "fleet";
+            r = r [ alice betaAge ] [ alphaSsh ];
+          }
+          {
             path = "nixos/services/mesh/secrets.yaml";
             kind = "service";
             r = r [ alice betaAge ] [ alphaSsh ];
@@ -650,14 +736,16 @@ check "unit-nixos" (
     # a layer kind is packages or units
     testLayerKindInvalid = {
       expr =
-        !(builtins.tryEval (ftl.lib.mkNixos {
-          inherit nixpkgs;
-          hosts.delta.layers = [ "old" ];
-          layers.old = {
-            kind = "apps";
-            packages = [ ];
-          };
-        }).nixosConfigurations.delta.config.fleet.layers.installed.old.kind).success;
+        !(builtins.tryEval
+          (ftl.lib.mkNixos {
+            inherit nixpkgs;
+            hosts.delta.layers = [ "old" ];
+            layers.old = {
+              kind = "apps";
+              packages = [ ];
+            };
+          }).nixosConfigurations.delta.config.fleet.layers.installed.old.kind
+        ).success;
       expected = true;
     };
 

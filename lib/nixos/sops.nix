@@ -1,13 +1,15 @@
-# Secret stores and who can read them (`fleet.sops`): a host's secrets.yaml is
-# for the host and the admins, its identity.yaml for the admins, a service's
-# secrets.yaml for its hosts, the admins and the users listing it, a user's
-# for that user. Recipients are sops keys (pgp fingerprints, age recipients)
+# Secret stores and who can read them (`fleet.sops`): the fleet's
+# nixos/secrets.yaml is for every host and the admins, its nixos/identity.yaml
+# for the admins; a host's secrets.yaml is for the host and the admins, its
+# identity.yaml for the admins; a service's secrets.yaml for its hosts, the
+# admins and the users listing it; a user's for that user. Recipients are sops keys (pgp fingerprints, age recipients)
 # and SSH host keys still to be converted with ssh-to-age; a host with a
 # sops.age is a recipient by that, else by its ssh.pub.
 ctx:
 let
   inherit (ctx)
     lib
+    src
     root'
     hosts'
     services'
@@ -55,7 +57,16 @@ let
       };
 
   stores =
-    lib.concatLists (
+    # the fleet's own: nixos/secrets.yaml for every host and the admins,
+    # nixos/identity.yaml for the admins
+    store "fleet" null src "secrets.yaml" (recipientsOf {
+      hostNames = builtins.attrNames hosts';
+      userNames = admins;
+    })
+    ++ store "fleet-identity" null src "identity.yaml" (recipientsOf {
+      userNames = admins;
+    })
+    ++ lib.concatLists (
       lib.mapAttrsToList (
         hostName: host:
         store "host" hostName host.dir "secrets.yaml" (recipientsOf {

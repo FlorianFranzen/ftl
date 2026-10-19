@@ -114,7 +114,8 @@ services, hosts their services and users, the stores all three).
     `nixosLayers.<sys>.<l>`, `nixosServices.<s>` (a service as a plain module);
   - `fleet.hosts` (every host's metadata: name, system, importance,
     layers, services, users, generators, keys, free-form data),
-    `services`/`fleet.services`, `users`/`fleet.users`;
+    `services`/`fleet.services`, `users`/`fleet.users`, `keys`/`fleet.keys`
+    (the fleet's `nixos/<name>.pub` files);
   - `sops.stores` (every store with its recipients: pgp and age keys, and the
     SSH host keys still to be converted), `generators` (what each makes) and
     `generatorPrograms system` (each as a program);
@@ -137,10 +138,12 @@ services, hosts their services and users, the stores all three).
   that `service` (metadata, `role`, `dir`, `sopsFile`) is injected without
   the module system looking it up; `nixosServices.<s>` uses the same wrapper
   with the roles resolved lazily from `config.fleet.meta.host`.
-- Stores: a host's `secrets.yaml` is for the host and the admins, its
-  `identity.yaml` for the admins, a service's `secrets.yaml` for its hosts,
-  the admins and the users listing it, a user's for that user. A host is a
-  recipient by its `sops.age` if present, else by its `ssh.pub`.
+- Stores: the fleet's `nixos/secrets.yaml` is for every host and the admins,
+  its `nixos/identity.yaml` for the admins; a host's `secrets.yaml` is for
+  the host and the admins, its `identity.yaml` for the admins; a service's
+  `secrets.yaml` for its hosts, the admins and the users listing it; a
+  user's for that user. A host is a recipient by its `sops.age` if present,
+  else by its `ssh.pub`.
 
 ### `lib/layer.nix` — `mkLayer`
 
@@ -171,8 +174,15 @@ services, hosts their services and users, the stores all three).
 - `host-keys`: SSH host key and initrd key (`ssh.pub`, `initrd.pub`; private
   halves in `identity.yaml`). On every host by default.
 - `age-key`: a dedicated age key (`sops.age`; key in `identity.yaml`).
-- Shape of any generator: `{ pkgs }: { description; runtimeInputs; files;
-  script; }`, where `files.<f> = { secret; store; }`.
+- Shape of any generator: `{ pkgs }: { description; scope; inputs;
+  runtimeInputs; files; script; }`, where `files.<f> = { secret; store; }`.
+  `scope` is `host` (per host, listed in `host.nix`, files next to it and in
+  its stores) or `fleet` (once, files in `nixos/` and in `nixos/secrets.yaml`
+  or `nixos/identity.yaml`; `nixos/<name>.pub` is `fleet.keys.<name>`).
+  `inputs` lists files of other generators (`<generator>/<file>`) the script
+  reads under `$in`; `mkNixos` checks that they exist, are declared, do not
+  loop, and that a fleet generator reads fleet files only. The program is
+  `generate-<name> <out> [<in>]`.
 
 ### `lib/flake.nix` — `mkFlake`
 
@@ -206,7 +216,7 @@ under `fleet.*`.
 | `comin` | `fleet.comin.*`, whether comin's and lanzaboote's modules are present | `services.comin.postDeploymentCommand` = the hook (system profile sync for lanzaboote, then layer update) | no |
 | `state` | `fleet.state.<name>` (`path`, `kind`, `units`, `service`, `backup`, `snapshots`, `zfs.properties`), `fleet.storage` (`btrfsDevice`, `zfsPool`, `zfsProperties`) | the `fleet-state` service creating subvolumes/datasets, one mount unit per entry, `RequiresMountsFor` on its units, an assertion that its units run with fixed uids or `DynamicUser` | no |
 | `access` | `fleet.access.*` (`users` defaults to the host's fleet users, `sudo`, `knownHosts`, `initrdPort`); the `fleet` argument when present | accounts with keys and no password, sshd without passwords or root, sudo via pam_rssh, every host's keys in `known_hosts` | `users` and `knownHosts` need `fleet`; standalone, set `fleet.access.users` |
-| `secrets` | `fleet.secrets.*` (`file` and `ageKeyFile` set by mkNixos); whether sops-nix's module is present | `sops.defaultSopsFile`, `sops.age.keyFile`, `sops.gnupg.sshKeyPaths = []` | `file` comes from mkNixos; settable by hand |
+| `secrets` | `fleet.secrets.*` (`file`, `shared` and `ageKeyFile` set by mkNixos); whether sops-nix's module is present | `sops.defaultSopsFile`, `sops.age.keyFile`, `sops.gnupg.sshKeyPaths = []`; `shared` for modules to point a secret at | `file` comes from mkNixos; settable by hand |
 | `scripts` (a function, not a module) | `pkgs` | the packaged scripts: `fleetl` (+`ftl` alias), `ftl-layers`, `ftl-status`, `ftl-pipeline`, `ftl-cache-retention` | no |
 
 ## Standalone use
@@ -218,7 +228,7 @@ Each module can be imported on its own (`ftl.nixosModules.<name>`); what
 |---|---|
 | `layers` | `fleet.layers.installed.<l>.kind`, `fleet.layers.repo` |
 | `access` | `fleet.access.users` (without the `fleet` argument there are no accounts and no known hosts) |
-| `secrets` | `fleet.secrets.file`, `fleet.secrets.ageKeyFile` |
+| `secrets` | `fleet.secrets.file`, `fleet.secrets.shared`, `fleet.secrets.ageKeyFile` |
 | `meta` | nothing; `fleet.meta.host` is null, which `nixosServices` tolerates (`service.role = []`) |
 | `nixosServices.<s>` | the special arguments its modules use (`fleet`, `profiles`, ...); it is meant for other configurations of the same fleet |
 
@@ -255,7 +265,10 @@ arguments; stores need `root`.
   places public files, re-renders `.sops.yaml`, and writes secrets into the
   stores (a new store in one `sops --encrypt`; an existing one with `sops set`,
   which needs the admin's key); `host install` unpacks `identity.yaml` for
-  nixos-anywhere; `host exec` runs a command on a host (or on every host that
+  nixos-anywhere; `fleet generate` runs the fleet-scoped generators the same
+  way, into `nixos/`; a generator's inputs are made first when missing and
+  put under `$in` (a secret decrypted from its store, which needs the
+  admin's key); `host exec` runs a command on a host (or on every host that
   is not ignored) at the deploy output's address and login (else the host's
   `fqdn` or name, and root), pinned to its `ssh.pub` the way `mkDeploy` pins
   deploys. Temporary directories are `0700` and removed on any exit.

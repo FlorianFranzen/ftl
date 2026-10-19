@@ -1,7 +1,8 @@
 # fleet.secrets: the host's secret store, nixos/hosts/<host>/secrets.yaml,
 # decrypted by sops-nix with the host's SSH host key (its ssh-to-age form is
 # the store's recipient), or with the age key at `ageKeyFile` for a host that
-# has a `sops.age` next to its host.nix instead.
+# has a `sops.age` next to its host.nix instead. The fleet's shared store,
+# nixos/secrets.yaml, is `shared`; every host is a recipient of it.
 #
 # Services keep their secrets in their own folder: `service.sopsFile` in a
 # service module is nixos/services/<service>/secrets.yaml, so
@@ -38,6 +39,16 @@ in
       type = lib.types.nullOr lib.types.path;
       default = null;
       description = "The host's secret store (set by ftl.lib.mkNixos when the file exists).";
+    };
+
+    shared = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = ''
+        The fleet's shared store, nixos/secrets.yaml, which every host can read
+        (set by ftl.lib.mkNixos when the file exists); a secret of it is
+        `sops.secrets.<name>.sopsFile = config.fleet.secrets.shared`.
+      '';
     };
 
     ageKeyFile = lib.mkOption {

@@ -28,6 +28,16 @@ creation_rules:
     key_groups:
       - age:
           - age18jlex7sq6yufhk48ljzs5uzxrtazqrchddanezf7w5gl48nccv7sflpg7l
+  - path_regex: ^nixos/identity\.yaml$
+    key_groups:
+      - age:
+          - age18jlex7sq6yufhk48ljzs5uzxrtazqrchddanezf7w5gl48nccv7sflpg7l
+  - path_regex: ^nixos/secrets\.yaml$
+    key_groups:
+      - age:
+          - age1880pyzlyypv0cmec6e3tgwww9tgum9cywqn5743flkdz6krlxy2sksedxt
+          - age18jlex7sq6yufhk48ljzs5uzxrtazqrchddanezf7w5gl48nccv7sflpg7l
+          - age1xfyxhut43fh8sr94cp0efdp3s2k326g64nuqdtfxs8ff6e8p4p6s8h08er
   - path_regex: ^nixos/services/mesh/secrets\.yaml$
     key_groups:
       - age:
