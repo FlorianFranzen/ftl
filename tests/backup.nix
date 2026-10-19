@@ -347,6 +347,17 @@ pkgs.testers.runNixOSTest {
         for aside in asides("mail"):
             machine.succeed(f"fleet-state discard {aside}")
 
+    with subtest("a backup made before the tags (as infra's were) restores with the root as it is"):
+        out = machine.succeed(
+            "rustic -P state backup --no-progress --json --host alpha --label mail --as-path /var/lib/mail /var/lib/mail"
+        )
+        old = json.loads(out)["id"]
+        machine.succeed(f"fleet-state restore mail --snapshot {old[:8]}")
+        assert machine.succeed("stat -c %u:%a /var/lib/mail").strip() == "990:710"
+        machine.succeed("systemctl is-active mail.service")
+        for aside in asides("mail"):
+            machine.succeed(f"fleet-state discard {aside}")
+
     with subtest("discard takes nothing but a copy kept aside"):
         stem = "tank" if zfs else "@apps"
         machine.fail(f"fleet-state discard {'tank/apps' if zfs else '@apps'}/mail.aside-20260101T000000/../../apps/echo")

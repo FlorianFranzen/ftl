@@ -86,8 +86,9 @@ case "${1:-}" in
   -h | --help | help) usage 0 ;;
   "") usage ;;
 esac
-# errexit in command substitutions too
+# errexit in command substitutions too; one collation for sort and comm
 shopt -s inherit_errexit
+export LC_ALL=C
 [ "$(id -u)" = 0 ] || die "run as root"
 [ -f "$state_json" ] || die "no $state_json: this host keeps no fleet.state"
 backend="$(jq -r .backend "$state_json")"
@@ -478,7 +479,8 @@ still_stopped() { # <entry>
 # is part of, requisites or is triggered by them (not through targets, which
 # everything is reachable from).
 needing() { # <unit>...
-  local u v
+  local u
+  local -a v
   local -A seen=()
   local -a queue=("$@")
   while [ "${#queue[@]}" -gt 0 ]; do
@@ -490,9 +492,9 @@ needing() { # <unit>...
       *.target | *.slice | *.scope | *.device) continue ;;
     esac
     echo "$u"
-    for v in $(systemctl show --value -p RequiredBy -p BoundBy -p ConsistsOf -p RequisiteOf -p TriggeredBy "$u" 2>/dev/null); do
-      queue+=("$v")
-    done
+    while read -ra v; do
+      queue+=("${v[@]}")
+    done < <(systemctl show --value -p RequiredBy -p BoundBy -p ConsistsOf -p RequisiteOf -p TriggeredBy "$u" 2>/dev/null || true)
   done | sort -u
 }
 
@@ -552,6 +554,8 @@ quiesce() {
     fi
     mapfile -t -O "${#triggers[@]}" triggers < <(triggers_of "$name")
     needing "${own[@]}" | comm -12 <(active_units) - | restartable "$name" >"$scratch/before.$name"
+    # triggers of what needs the entry (a socket of a service needing it)
+    mapfile -t -O "${#triggers[@]}" triggers < <(grep -E '\.(socket|timer|path)$' "$scratch/before.$name" || true)
     cp "$records/$name.stopped" "$scratch/prior.$name" 2>/dev/null || : >"$scratch/prior.$name"
     add_record "$name" "$scratch/before.$name"
     mapfile -t units < <(declared_units "$name"; triggers_of "$name")
@@ -571,12 +575,12 @@ quiesce() {
   fi
   if [ "${#mounts[@]}" -gt 0 ]; then
     if ! systemctl stop "${mounts[@]}"; then
-      resume "$@"
+      undo_quiesce "$@"
       die "could not unmount ${mounts[*]}"
     fi
     for name in "$@"; do
       if mountpoint -q "$(field "$name" path)"; then
-        resume "$@"
+        undo_quiesce "$@"
         die "$name: $(field "$name" path) is still mounted"
       fi
     done
@@ -586,6 +590,12 @@ quiesce() {
     comm -23 <(sort "$scratch/before.$name") <(active_units) >"$scratch/stopped.$name"
     add_record "$name" "$scratch/stopped.$name"
   done
+}
+
+# A quiesce that failed, undone as far as the swap it is part of wants.
+undo_quiesce() { # <entry>...
+  swap_resumed=1
+  if [ "$swap_start" = 1 ]; then resume "$@"; else resume --mounts-only "$@"; fi
 }
 
 # resume [--mounts-only] <entry>...: what quiesce stopped, started again, and
@@ -626,11 +636,22 @@ resume() {
       rm -f "$records/$name.stopped"
     done
   fi
-  # what other entries still block waits for them
+  # what other entries still block waits for them: what their drop-ins
+  # block (a template's covers its instances), and what needs that
   for other in "$records"/*.blocked; do
     [ -f "$other" ] || continue
     other="$(basename "$other" .blocked)"
-    mapfile -t held < "$records/$other.blocked"
+    held=()
+    while IFS= read -r u; do
+      [ -n "$u" ] || continue
+      if [[ $u == *@.* ]]; then continue; fi
+      held+=("$u")
+    done <"$records/$other.blocked"
+    while IFS= read -r u; do
+      if [[ $u == *@*.* ]] && [ -f "$dropins/${u%%@*}@.${u##*.}.d/fleet-state-$other.conf" ]; then
+        held+=("$u")
+      fi
+    done <"$scratch/resume"
     needing "${held[@]}" | comm -12 <(sort "$scratch/resume") - >"$scratch/held"
     if [ -s "$scratch/held" ]; then
       add_record "$other" "$scratch/held"
@@ -704,8 +725,8 @@ swap_in() {
     if [ "$backend" = zfs ]; then zfs set com.sun:auto-snapshot=false "$swap_aside"; fi
   fi
   rename_location "$new" "$swap_loc"
-  apply_properties "$name" "$swap_loc"
   swap_done=1
+  apply_properties "$name" "$swap_loc"
   swap_unlock
   log "$name: swapped in${swap_aside:+; what was there is kept aside as $swap_aside}"
 
@@ -939,13 +960,19 @@ snapshot_path() { # <profile> <id>
 }
 
 # The restored directory gets the owner and mode the entry's root had.
-restore_root() { # <profile> <id> <directory>
+restore_root() { # <profile> <id> <directory> [<current root>]
   local root uid gid mode
   root="$(rustic -P "$1" snapshots --json |
     jq -r --arg id "$2" '[.[].snapshots[] | select(.id == $id)][0].tags // [] | map(select(startswith("fleet-root:"))) | .[0] // empty')"
   if [ -z "$root" ]; then
-    log "warning: the backup does not say who owned its top directory; left root's, 0755"
-    return 0
+    # a backup from before the tag: as the entry's root is now, if there is one
+    if [ -n "${4:-}" ] && [ -d "$4" ]; then
+      log "the backup does not say who owned its top directory; as it is now"
+      root="fleet-root:$(stat -c '%u:%g:%a' "$4")"
+    else
+      log "warning: the backup does not say who owned its top directory; left root's, 0755"
+      return 0
+    fi
   fi
   IFS=: read -r _ uid gid mode <<<"$root"
   [[ $uid =~ ^[0-9]+$ && $gid =~ ^[0-9]+$ && $mode =~ ^[0-7]{3,4}$ ]] || die "the backup's fleet-root tag is malformed: $root"
@@ -993,7 +1020,7 @@ cmd_restore() {
   spath="$(snapshot_path "$p" "$id")"
   log "$name: restoring snapshot ${id:0:8} of $from ($spath)"
   rustic -P "$p" restore --no-progress --numeric-id "$id:$spath" "$opened"
-  restore_root "$p" "$id" "$opened"
+  restore_root "$p" "$id" "$opened" "$(field "$name" path)"
   close_location "$opened"
 
   if [ "$start" = 1 ]; then
@@ -1266,8 +1293,9 @@ place() {
     if ! rename_location "$incoming" "$loc"; then
       if [ -n "$aside" ]; then rename_location "$aside" "$loc"; fi
       swap_unlock
+      log "$name: could not put $incoming in place; left as it was"
       uncritical
-      die "$name: could not put $incoming in place; left as it was"
+      exit 1
     fi
     swap_unlock
     uncritical
@@ -1350,9 +1378,20 @@ cmd_drop() {
     done
   fi
   destroy_location "$loc"
-  # a freeze's block, if the host has not rebooted since
+  # a freeze's block, if the host has not rebooted since, and what it holds
+  # for others that the host still has
+  local -a left=()
+  if [ -f "$records/$name.stopped" ]; then
+    while IFS= read -r m; do
+      if [ -n "$m" ] && [ -n "$(systemctl show -P FragmentPath "$m" 2>/dev/null)" ]; then left+=("$m"); fi
+    done <"$records/$name.stopped"
+  fi
   unblock "$name"
   rm -f "$records/$name.stopped"
+  if [ "${#left[@]}" -gt 0 ]; then
+    systemctl reset-failed "${left[@]}" 2>/dev/null || true
+    systemctl start "${left[@]}" || log "$name: could not start ${left[*]} again"
+  fi
   log "$name: $loc destroyed"
 }
 

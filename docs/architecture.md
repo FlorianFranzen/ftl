@@ -315,7 +315,10 @@ arguments; stores need `root`.
     a failure halfway can be resumed), at the end what actually stopped.
     Records and blocks add up over repeated stops; on resume, what another
     entry still blocks, and what needs that, is handed to that entry's
-    record. HUP, INT and TERM are held during a swap and end the run after
+    record (held by drop-in, so a blocked template holds its instances);
+    a unit that needs a blocked unit only through a target is not seen as
+    held. Active sockets, timers and paths in the scope are stopped too.
+    HUP, INT and TERM are held during a swap and end the run after
     it, SIGPIPE is ignored throughout (a lost admin connection fails
     writes, not the run), and a cleanup registered before the swap puts
     the old location back and resumes (only the mounts with `--no-start`)
@@ -324,7 +327,8 @@ arguments; stores need `root`.
     `rollback` and the moves' `place` all work this way.
   - `backup` labels each rustic snapshot with the entry, records the host,
     tags `fleet-entry:`, `fleet-service:` and `fleet-root:<uid>:<gid>:<mode>`
-    (rustic keeps no metadata of an `--as-path` root; restores apply it),
+    (rustic keeps no metadata of an `--as-path` root; restores apply it,
+    or for a backup without the tag the root's owner and mode as they are),
     and prints `<entry> <id>`; `--all` prunes even when an entry failed and
     writes the metrics (the last success kept when not). Steps that may
     fail alone run in a subshell outside any condition, so errexit holds
