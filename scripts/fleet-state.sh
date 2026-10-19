@@ -6,6 +6,14 @@
 #                                          then prune by retention and write the metrics
 #   fleet-state init                       create the backup repositories (once per host)
 #   fleet-state snapshots [<entry>]        the backups of an entry, or of the whole host
+#   fleet-state restore <entry> [--snapshot <id>] [--from-host <host>] [--no-start]
+#                                          put the entry back as a backup has it (the
+#                                          latest by default): its units stopped, the
+#                                          current content kept as a rollback snapshot,
+#                                          files the backup does not have removed
+#   fleet-state stop <entry>...            stop what uses the entries (their units, the
+#                                          instances of template units, their sockets)
+#   fleet-state start <entry>...           start it again
 #
 # What the host keeps is described by /etc/fleet-state/state.json (written by
 # the state module), its backups by /etc/fleet-state/backup.json and the rustic
@@ -136,6 +144,111 @@ snapshot_take() {
   fi
 }
 
+# --- units ---------------------------------------------------------------------
+
+# The systemd units that use an entry, as they are now: its units (for a
+# template `x@`, its running instances), and what triggers them (sockets,
+# timers, paths), triggers first, so that stopping in this order leaves
+# nothing to start them again.
+units_of() { # <entry>
+  local name="$1" u
+  local -a services=() triggers=()
+  while IFS= read -r u; do
+    [ -n "$u" ] || continue
+    if [[ $u == *@ ]]; then
+      mapfile -t -O "${#services[@]}" services < <(
+        systemctl list-units --all --plain --no-legend --type=service "${u}*.service" | awk '{ print $1 }'
+      )
+      # an Accept=yes socket spawns the instances
+      if systemctl cat "${u%@}.socket" >/dev/null 2>&1; then
+        triggers+=("${u%@}.socket")
+      fi
+    else
+      services+=("$u.service")
+    fi
+  done < <(jq -r --arg n "$name" '.entries[$n].units[]' "$state_json")
+  for u in "${services[@]}"; do
+    # shellcheck disable=SC2207
+    triggers+=($(systemctl show -P TriggeredBy "$u"))
+  done
+  printf '%s\n' "${triggers[@]}" "${services[@]}" | awk 'NF && !seen[$0]++'
+}
+
+# stop_units <entry>...: stops what uses the entries, and records in
+# $scratch/active what was running, for start_units.
+stop_units() {
+  local name u
+  local -a units=()
+  for name in "$@"; do
+    mapfile -t -O "${#units[@]}" units < <(units_of "$name")
+  done
+  : >"$scratch/active"
+  for u in "${units[@]}"; do
+    if systemctl is-active --quiet "$u"; then
+      echo "$u" >>"$scratch/active"
+    fi
+  done
+  if [ "${#units[@]}" -gt 0 ]; then
+    log "stopping ${units[*]}"
+    systemctl stop "${units[@]}"
+  fi
+}
+
+# start_units: what stop_units found running, triggers last.
+start_units() {
+  local -a units=()
+  [ -f "$scratch/active" ] && mapfile -t units < <(tac "$scratch/active")
+  if [ "${#units[@]}" -gt 0 ]; then
+    log "starting ${units[*]}"
+    systemctl start "${units[@]}"
+  fi
+}
+
+cmd_stop() {
+  [ $# -gt 0 ] || usage
+  local name
+  for name in "$@"; do need_entry "$name"; done
+  stop_units "$@"
+}
+
+# Starting an entry's units starts what they need, its mount included.
+cmd_start() {
+  [ $# -gt 0 ] || usage
+  local name u
+  local -a units=()
+  for name in "$@"; do
+    need_entry "$name"
+    while IFS= read -r u; do
+      [ -n "$u" ] || continue
+      if [[ $u == *@ ]]; then
+        systemctl cat "${u%@}.socket" >/dev/null 2>&1 && units+=("${u%@}.socket")
+      else
+        units+=("$u.service")
+      fi
+    done < <(jq -r --arg n "$name" '.entries[$n].units[]' "$state_json")
+  done
+  if [ "${#units[@]}" -gt 0 ]; then
+    systemctl start "${units[@]}"
+  fi
+}
+
+# --- mounts --------------------------------------------------------------------
+
+# The entry mounted at its path, from its own dataset or subvolume (and not,
+# say, an empty directory on the root filesystem).
+need_mounted() { # <entry>
+  local name="$1" path loc source
+  path="$(field "$name" path)"
+  loc="$(field "$name" location)"
+  systemctl start "$(systemd-escape --path --suffix=mount "$path")"
+  source="$(findmnt -n -o SOURCE --mountpoint "$path" || true)"
+  if [ "$backend" = zfs ]; then
+    [ "$source" = "$loc" ] || die "$name: $path is not $loc (mounted: ${source:-nothing})"
+  else
+    [[ $source == *"[/$loc]" ]] || die "$name: $path is not $loc (mounted: ${source:-nothing})"
+  fi
+}
+
 # --- backups -------------------------------------------------------------------
 
 backup_on() { [ -f "$backup_json" ]; }
@@ -243,6 +356,79 @@ cmd_snapshots() {
   fi
 }
 
+# The rustic snapshot of an entry: the latest of the host's (or another
+# host's, by name), or the one given by id (a prefix will do).  Prints its id.
+find_snapshot() { # <profile> <entry> <host> <id or latest>
+  local profile="$1" name="$2" from="$3" want="$4" json
+  json="$(rustic -P "$profile" snapshots --json --filter-host "$from" --filter-label "$name")"
+  jq -r --arg want "$want" '
+    [.[].snapshots[]] | sort_by(.time) |
+    if $want == "latest" then last else map(select(.id | startswith($want))) | if length == 1 then .[0] else null end end |
+    if . == null then empty else .id end' <<<"$json"
+}
+
+cmd_restore() {
+  need_backup
+  local name="" want=latest from="$host" start=1
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --snapshot) want="${2:?--snapshot needs an id}"; shift ;;
+      --from-host) from="${2:?--from-host needs a host}"; shift ;;
+      --no-start) start=0 ;;
+      -*) usage ;;
+      *) [ -z "$name" ] || usage; name="$1" ;;
+    esac
+    shift
+  done
+  [ -n "$name" ] || usage
+  need_entry "$name"
+
+  local kind path loc p id stamp rollback
+  kind="$(field "$name" kind)"
+  path="$(field "$name" path)"
+  loc="$(field "$name" location)"
+  p="$(profile "$kind")"
+  [ -f "$p.toml" ] || die "$name: no repository for kind $kind"
+  id="$(find_snapshot "$p" "$name" "$from" "$want")"
+  [ -n "$id" ] || die "$name: no snapshot '$want' of $from (fleet-state snapshots $name)"
+  log "$name: restoring snapshot ${id:0:8} of $from into $path"
+
+  lock
+  need_mounted "$name"
+  stop_units "$name"
+
+  # The content as it was, to go back to: kept, not part of the cleanups.
+  stamp="$(date +%Y%m%dT%H%M%S)"
+  if [ "$backend" = zfs ]; then
+    rollback="$loc@fleet-pre-restore-$stamp"
+    zfs snapshot "$rollback"
+  else
+    mount_top
+    mkdir -p "$top/@fleet-snapshots"
+    rollback="@fleet-snapshots/$name@pre-restore-$stamp"
+    btrfs subvolume snapshot -r "$top/$loc" "$top/$rollback" >/dev/null
+  fi
+  log "$name: what was there is kept as $rollback"
+
+  if ! rustic -P "$p" restore --no-progress --delete --numeric-id "$id:$path" "$path"; then
+    log "$name: the restore failed; its units stay stopped"
+    die "$name: back to what was there: $(rollback_hint "$name" "$rollback")"
+  fi
+  if [ "$start" = 1 ]; then
+    start_units
+  else
+    log "$name: restored; its units stay stopped (fleet-state start $name)"
+  fi
+}
+
+rollback_hint() { # <entry> <rollback snapshot>
+  if [ "$backend" = zfs ]; then
+    echo "zfs rollback -r $2"
+  else
+    echo "replace the subvolume $(field "$1" location) with a writable snapshot of $2 (btrfs subvolume snapshot)"
+  fi
+}
+
 cmd_list() {
   jq -r '.entries | to_entries[] |
     "\(.key)\t\(.value.kind)\t\(.value.path)\t\(.value.location)\t\(.value.service // "-")\tbackup=\(.value.backup)"' \
@@ -258,6 +444,9 @@ case "${1:-}" in
   backup) shift; cmd_backup "$@" ;;
   init) cmd_init ;;
   snapshots) shift; cmd_snapshots "$@" ;;
+  restore) shift; cmd_restore "$@" ;;
+  stop) shift; cmd_stop "$@" ;;
+  start) shift; cmd_start "$@" ;;
   -h | --help | help) usage 0 ;;
   *) usage ;;
 esac

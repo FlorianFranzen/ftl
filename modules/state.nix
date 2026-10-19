@@ -155,6 +155,7 @@ let
         jq
         gnutar
         gnugrep
+        gawk
         systemd
         rustic
       ]

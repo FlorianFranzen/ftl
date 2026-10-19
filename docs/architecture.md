@@ -272,7 +272,10 @@ arguments; stores need `root`.
   admin's key); `host exec` runs a command on a host (or on every host that
   is not ignored) at the deploy output's address and login (else the host's
   `fqdn` or name, and root), pinned to its `ssh.pub` the way `mkDeploy` pins
-  deploys. Temporary directories are `0700` and removed on any exit.
+  deploys; `state` runs `fleet-state` on a host as root, its arguments
+  quoted for the remote shell, through `sudo` with the agent forwarded
+  (pam_rssh) unless the login is root. Temporary directories are `0700` and
+  removed on any exit.
 - `fleet-state.sh` (hosts, as root; packaged by `modules/state.nix` with the
   host's ZFS or btrfs tools): reads `/etc/fleet-state/state.json` and, with
   backups on, `backup.json` and `/etc/rustic/<kind>.toml`. Every operation
@@ -281,7 +284,12 @@ arguments; stores need `root`.
   btrfs: `@fleet-snapshots/<entry>@<tag>` on the top level), never on what
   happens to be mounted at its path. `backup` labels each rustic snapshot
   with the entry, records the host, tags `fleet-entry:` and
-  `fleet-service:`; `--all` prunes and writes the metrics. Snapshots,
+  `fleet-service:`; `--all` prunes and writes the metrics. `restore`
+  checks with `findmnt` that the entry's own dataset or subvolume is at its
+  path, stops its units (template instances and an `Accept=yes` socket
+  included, triggers first), keeps a rollback snapshot that is not cleaned
+  up, runs `rustic restore --delete --numeric-id` into the path and starts
+  what was running. `stop` and `start` do the unit part alone. Snapshots,
   mounts and scratch space are undone on any exit, signals included; one
   mutating run at a time (`/run/fleet-state.lock`).
 - `ftl-layers.sh` (hosts): environment from `modules/layers.nix`

@@ -149,6 +149,11 @@ each library function and module reads, provides and does.
                                   a command on a host, or on every host that is
                                   not ignored, pinned to its ssh.pub
   fleetl host show | service show | user show <name>
+  fleetl state list | snapshots <host> [<entry>]
+  fleetl state backup <host> --all|<entry>...
+  fleetl state restore <host> <entry> [--snapshot <id>] [--no-start]
+                                  fleet-state on the host, as root (sudo through
+                                  the forwarded agent unless the login is root)
   fleetl fleet generate [--force] [<generator>...]
                                   the fleet's generators whose files are missing
   fleetl fleet show               the fleet: hosts, services, users, keys, stores
@@ -252,6 +257,17 @@ Three things live under `nixos/` besides hosts, and they are easy to mix up:
   makes them usable by hand (`rustic -P state snapshots`);
   `metrics.textfileDir` writes `fleet_backup_last_success_timestamp_seconds`
   and `fleet_backup_snapshots{kind}` for node_exporter.
+
+  A restore puts an entry back in place: `fleetl state restore <host>
+  <entry> [--snapshot <id>]` (on the host: `fleet-state restore`) checks that
+  the entry's own dataset or subvolume is mounted at its path, stops its
+  units (a template unit's instances and sockets included), keeps what is
+  there as a rollback snapshot (`<dataset>@fleet-pre-restore-<time>`, or
+  `@fleet-snapshots/<entry>@pre-restore-<time>` on btrfs), restores the
+  latest backup (or the one named) with the uids and gids as they were,
+  removing what the backup does not have, and starts again what was
+  running. A failed restore leaves the units stopped and says how to roll
+  back.
 
   ```nix
   fleet.backup = {
@@ -380,6 +396,8 @@ see whether the library still works with the channel's current head:
     init only by hand, labels, tags and hosts of the snapshots, owners kept,
     the entry backed up rather than what is mounted at its path, no
     snapshot or scratch directory left, a vanished repository failing;
+    restores of the latest and of an older backup with a rollback snapshot
+    and the units stopped and started again, a template unit's socket;
   - `services`: `fleet.secrets` with sops-nix for real: a host decrypts its own
     store and a service's with its SSH host key, no age key installed;
   - `layers`: layer install, update, pins and rollback, plus the comin hook;

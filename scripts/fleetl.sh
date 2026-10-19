@@ -17,6 +17,15 @@
 #                                       is not ignored), pinned to its ssh.pub
 #   fleetl host show <name>             a host: services, users, layers, keys, stores
 #   fleetl service show <name>          a service: hosts, roles, layers, data, store
+#   fleetl state list <host>            the host's state entries
+#   fleetl state snapshots <host> [<entry>]
+#                                       their backups
+#   fleetl state backup <host> --all|<entry>...
+#                                       back them up now
+#   fleetl state restore <host> <entry> [--snapshot <id>] [--no-start]
+#                                       put an entry back as a backup has it (its units
+#                                       stopped meanwhile, the current content kept as a
+#                                       rollback snapshot)
 #   fleetl fleet generate [--force] [<generator>...]
 #                                       run the fleet's generators whose files are missing
 #   fleetl fleet show                   the fleet: hosts, services, users, keys, stores
@@ -535,6 +544,47 @@ host_install() {
 # repository has one (mkDeploy: `address`, `sshUser`), else the host's fqdn or
 # name and root; the connection is pinned to the host's ssh.pub like a deploy.
 # FLEETL_SSH replaces the ssh program (tests).
+# ssh_to <host> [<user>]: the ssh command line for a host, in ${ssh_cmd[@]}.
+# The address and the login are those of the deploy output when the
+# repository has one (mkDeploy: `address`, `sshUser`), else the host's fqdn or
+# name and root; the connection is pinned to the host's ssh.pub like a
+# deploy.  FLEETL_SSH replaces the ssh program (tests).
+hosts_json=""
+ssh_cmd=()
+ssh_user=""
+ssh_to() {
+  local h="$1" user="${2:-}" address key
+  [ -n "$hosts_json" ] || hosts_json="$(fleet_json hosts)"
+  jq -e --arg h "$h" 'has($h)' <<<"$hosts_json" >/dev/null || die "no host '$h'"
+  [ -n "$user" ] || user="$(nix eval --raw .#deploy.sshUser 2>/dev/null || echo root)"
+  address="$(nix eval --raw ".#deploy.nodes.\"$h\".hostname" 2>/dev/null || jq -r --arg h "$h" '.[$h].fqdn // $h' <<<"$hosts_json")"
+  key="$(jq -r --arg h "$h" '.[$h].keys.ssh // empty' <<<"$hosts_json")"
+  ssh_cmd=("${FLEETL_SSH:-ssh}")
+  if [ -n "$key" ]; then
+    echo "$h $key" >"$tmp/known_hosts.$h"
+    ssh_cmd+=(-o "HostKeyAlias=$h" -o "UserKnownHostsFile=$tmp/known_hosts.$h" -o StrictHostKeyChecking=yes)
+  else
+    echo "fleetl: $h has no ssh.pub, trusting your known_hosts" >&2
+  fi
+  ssh_user="$user"
+  ssh_cmd+=("$user@$address")
+}
+
+# as_root <host> <command...>: the command as root on the host, quoted for
+# the remote shell; through sudo (with the agent forwarded, for pam_rssh)
+# unless the login is root.
+as_root() {
+  local h="$1"
+  shift
+  ssh_to "$h"
+  local -a cmd=("$@")
+  if [ "$ssh_user" != root ]; then
+    cmd=(sudo "${cmd[@]}")
+    ssh_cmd=("${ssh_cmd[0]}" -A "${ssh_cmd[@]:1}")
+  fi
+  "${ssh_cmd[@]}" -- "$(printf '%q ' "${cmd[@]}")"
+}
+
 host_exec() {
   in_repo
   local name="${1:?usage: fleetl host exec <name>|all [--user <u>] [--] <command...>}"
@@ -550,38 +600,42 @@ host_exec() {
   done
   [ $# -gt 0 ] || die "host exec: no command given"
 
-  local hosts
-  hosts="$(fleet_json hosts)"
+  hosts_json="$(fleet_json hosts)"
   local -a names
   if [ "$name" = all ]; then
-    mapfile -t names < <(jq -r 'to_entries[] | select(.value.importance != "ignored") | .key' <<<"$hosts")
+    mapfile -t names < <(jq -r 'to_entries[] | select(.value.importance != "ignored") | .key' <<<"$hosts_json")
   else
-    jq -e --arg h "$name" 'has($h)' <<<"$hosts" >/dev/null || die "no host '$name'"
+    jq -e --arg h "$name" 'has($h)' <<<"$hosts_json" >/dev/null || die "no host '$name'"
     names=("$name")
   fi
-  [ -n "$user" ] || user="$(nix eval --raw .#deploy.sshUser 2>/dev/null || echo root)"
 
-  local h address key status=0
+  local h status=0
   for h in "${names[@]}"; do
-    address="$(nix eval --raw ".#deploy.nodes.\"$h\".hostname" 2>/dev/null || jq -r --arg h "$h" '.[$h].fqdn // $h' <<<"$hosts")"
-    key="$(jq -r --arg h "$h" '.[$h].keys.ssh // empty' <<<"$hosts")"
-    local -a opts=()
-    if [ -n "$key" ]; then
-      echo "$h $key" >"$tmp/known_hosts.$h"
-      opts=(-o "HostKeyAlias=$h" -o "UserKnownHostsFile=$tmp/known_hosts.$h" -o StrictHostKeyChecking=yes)
-    else
-      echo "fleetl: $h has no ssh.pub, trusting your known_hosts" >&2
-    fi
+    ssh_to "$h" "$user"
     if [ "$name" = all ]; then
-      echo "== $h ($user@$address)" >&2
+      echo "== $h (${ssh_cmd[-1]})" >&2
     fi
-    "${FLEETL_SSH:-ssh}" "${opts[@]}" "$user@$address" -- "$@" || {
+    "${ssh_cmd[@]}" -- "$@" || {
       status=$?
       [ "$name" = all ] || exit "$status"
       echo "fleetl: $h: exit $status" >&2
     }
   done
   exit "$status"
+}
+
+# --- state ---------------------------------------------------------------------
+
+# The entries of a host, as fleet-state on it knows them: list, backup,
+# snapshots, restore (see fleet-state on the host for the details).
+state_cmd() {
+  in_repo
+  local sub="$1" h="${2:?usage: fleetl state $1 <host> ...}"
+  shift 2
+  case "$sub" in
+    restore) [ $# -gt 0 ] || die "usage: fleetl state restore <host> <entry> [--snapshot <id>] [--no-start]" ;;
+  esac
+  as_root "$h" fleet-state "$sub" "$@"
 }
 
 # --- user ----------------------------------------------------------------------
@@ -660,6 +714,12 @@ case "${1:-}" in
     case "${2:-}" in
       generate) shift 2; fleet_generate "$@" ;;
       show) fleet_show ;;
+      *) usage ;;
+    esac
+    ;;
+  state)
+    case "${2:-}" in
+      list | snapshots | backup | restore) state_cmd "${@:2}" ;;
       *) usage ;;
     esac
     ;;

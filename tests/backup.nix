@@ -35,6 +35,11 @@ pkgs.testers.runNixOSTest {
           units = [ "mail" ];
           service = "mail";
         };
+        # used by a socket-activated template unit
+        echo = {
+          path = "/var/lib/echo";
+          units = [ "echo@" ];
+        };
         # data, not backed up unless it opts in
         library = {
           path = "/srv/library";
@@ -56,6 +61,19 @@ pkgs.testers.runNixOSTest {
           ExecStartPre = "+${pkgs.coreutils}/bin/chown mail:mail /var/lib/mail";
         };
         script = "date >> /var/lib/mail/log";
+      };
+
+      systemd.sockets.echo = {
+        wantedBy = [ "sockets.target" ];
+        listenStreams = [ "7777" ];
+        socketConfig.Accept = true;
+      };
+      systemd.services."echo@" = {
+        serviceConfig = {
+          ExecStart = "${pkgs.coreutils}/bin/cat";
+          StandardInput = "socket";
+          DynamicUser = true;
+        };
       };
 
       fleet.backup = {
@@ -108,7 +126,7 @@ pkgs.testers.runNixOSTest {
         assert snapshots("library") == []
         metrics = machine.succeed("cat /var/lib/metrics/fleet-backup.prom")
         assert "fleet_backup_last_success_timestamp_seconds " in metrics, metrics
-        assert 'fleet_backup_snapshots{kind="state"} 1' in metrics, metrics
+        assert 'fleet_backup_snapshots{kind="state"} 2' in metrics, metrics  # mail and echo
 
     with subtest("the snapshot used for it is gone again"):
         if zfs:
@@ -142,6 +160,49 @@ pkgs.testers.runNixOSTest {
         machine.fail("test -e /tmp/restore/on-root")
         machine.succeed("test -e /tmp/restore/note")
         machine.succeed("rm /var/lib/mail/on-root && systemctl start mail.service")
+
+    def lines(f):
+        return int(machine.succeed(f"wc -l < {f}").strip())
+
+    with subtest("a restore puts the entry back, keeps what was there, restarts the units"):
+        machine.succeed("fleet-state backup mail")
+        logged = lines("/var/lib/mail/log")
+        machine.succeed("echo changed > /var/lib/mail/note && touch /var/lib/mail/stray && rm /var/lib/mail/inbox")
+        machine.succeed("fleet-state restore mail")
+        machine.succeed("grep -qx again /var/lib/mail/note && test -s /var/lib/mail/inbox")
+        machine.fail("test -e /var/lib/mail/stray")
+        assert machine.succeed("stat -c %u:%g /var/lib/mail/inbox").strip() == "990:990"
+        # stopped for it and started again: one more line than the backup had
+        machine.succeed("systemctl is-active mail.service")
+        assert lines("/var/lib/mail/log") == logged + 1, (logged, lines("/var/lib/mail/log"))
+        # what was there before, as a rollback snapshot
+        if zfs:
+            snaps = machine.succeed("zfs list -H -t snapshot -o name tank/apps/mail")
+            pre = [l for l in snaps.split() if "@fleet-pre-restore-" in l]
+            assert len(pre) == 1, snaps
+            machine.succeed(f"mkdir -p /mnt/pre && mount -t zfs {pre[0]} /mnt/pre")
+            machine.succeed("test -e /mnt/pre/stray && umount /mnt/pre")
+        else:
+            machine.succeed("mount -o subvolid=5 /dev/vdb /mnt/top")
+            machine.succeed("test -e /mnt/top/@fleet-snapshots/mail@pre-restore-*/stray")
+            machine.succeed("umount /mnt/top")
+
+    with subtest("an older backup by id; units left stopped on request"):
+        first = sorted(snapshots("mail"), key=lambda s: s["time"])[0]["id"][:8]
+        machine.succeed(f"fleet-state restore mail --snapshot {first} --no-start")
+        machine.fail("test -e /var/lib/mail/note")
+        machine.fail("systemctl is-active mail.service")
+        machine.succeed("fleet-state start mail")
+        machine.succeed("systemctl is-active mail.service")
+        machine.fail("fleet-state restore mail --snapshot 00000000")
+        machine.fail("fleet-state restore nosuch")
+
+    with subtest("stopping an entry stops its template units' socket, starting starts it"):
+        machine.succeed("systemctl is-active echo.socket")
+        machine.succeed("fleet-state stop echo")
+        machine.fail("systemctl is-active echo.socket")
+        machine.succeed("fleet-state start echo")
+        machine.succeed("systemctl is-active echo.socket")
 
     with subtest("a repository gone missing fails the next backup"):
         machine.succeed("rm -r /var/backup/state")

@@ -154,6 +154,21 @@ pkgs.runCommand "cli"
     ! fleetl host exec nosuch -- true 2>/dev/null || { echo "unknown host accepted"; exit 1; }
     ! fleetl host exec alpha 2>/dev/null || { echo "missing command accepted"; exit 1; }
 
+    # --- state ---------------------------------------------------------------
+    # fleet-state as root: through sudo with the agent forwarded (pam_rssh)
+    # unless the login is root, the arguments quoted for the remote shell
+    got="$(fleetl state restore alpha mail --snapshot 'a b')"
+    echo "$got"
+    case "$got" in
+      "ssh -A -o HostKeyAlias=alpha "*" admin@10.0.0.1 -- sudo fleet-state restore mail --snapshot a\\ b ") ;;
+      *) echo "state restore: unexpected command"; exit 1 ;;
+    esac
+    got="$(fleetl state list beta)"
+    echo "$got"
+    [ "$got" = "ssh -A admin@beta -- sudo fleet-state list " ] || { echo "state list: unexpected command"; exit 1; }
+    ! fleetl state restore alpha 2>/dev/null || { echo "restore without entry accepted"; exit 1; }
+    ! fleetl state list nosuch 2>/dev/null || { echo "unknown host accepted"; exit 1; }
+
     # --- generators --------------------------------------------------------
     # the admin is a fresh key; the fixture's stores (the fixture's alice's)
     # are not touched: alpha's own store goes, gamma has none
