@@ -132,7 +132,8 @@ each library function and module reads, provides and does.
   in a dev shell) is the fleet from the admin's machine, inside the repository:
 
   ```
-  fleetl secrets sync [--check]   .sops.yaml from the layout, re-key the stores
+  fleetl secrets sync [--check]   .sops.yaml from the layout; re-key the stores
+                                  whose recipients are not the rules' (--rekey: all)
   fleetl secrets edit <store>     sops on a store
   fleetl host init <name>         a host folder, its generators run (--age-key:
                                   a dedicated age key too)

@@ -252,7 +252,7 @@ consumer, `ftl-pipeline.sh`, reads `fleet.manifest` and falls back to
 - `fleetl.sh` (admin's machine, inside the repository): reads the flake's
   `fleet` output (`nix eval --json .#fleet.*`); `secrets sync` renders
   `.sops.yaml` from `fleet.sops` (SSH host keys through ssh-to-age) and
-  re-keys the stores (`sops updatekeys`, needs the admin's key); `host
+  re-keys the stores whose recipients, which sops keeps in the clear, differ from their rule (`sops updatekeys`, needs the admin's key); `host
   generate` runs `packages.<sys>.generate-<g>` into a temporary directory,
   places public files, re-renders `.sops.yaml`, and writes secrets into the
   stores (a new store in one `sops --encrypt`; an existing one with `sops set`,

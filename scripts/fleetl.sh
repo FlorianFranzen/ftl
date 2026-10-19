@@ -1,6 +1,8 @@
 # fleetl: the fleet from the admin's machine, inside the repository.
 #
-#   fleetl secrets sync [--check]       .sops.yaml from the layout, re-key the stores
+#   fleetl secrets sync [--check|--rekey]
+#                                       .sops.yaml from the layout; re-key the stores
+#                                       whose recipients are not the rules' (--rekey: all)
 #   fleetl secrets render               .sops.yaml for the `fleet.sops` JSON on stdin
 #   fleetl secrets edit <store>         sops on a store (creates it)
 #   fleetl host init <name> [--system <s>] [--age-key]
@@ -77,40 +79,76 @@ secrets_render() {
     }' <<<"$input" | yq -P
 }
 
+# The recipients a store should have, from the rules; and the ones it has,
+# which sops keeps in the clear.  Both as sorted lists of age recipients and
+# pgp fingerprints.
+rule_recipients() { # <store path>
+  local n i regex
+  n="$(yq '.creation_rules | length' .sops.yaml)"
+  for ((i = 0; i < n; i++)); do
+    regex="$(yq ".creation_rules[$i].path_regex" .sops.yaml)"
+    if [[ $1 =~ $regex ]]; then
+      yq ".creation_rules[$i].key_groups[] | (.age[]?, .pgp[]?)" .sops.yaml | sort -u
+      return 0
+    fi
+  done
+  return 1
+}
+
+store_recipients() { # <store path>
+  yq '.sops.age[]?.recipient, .sops.pgp[]?.fp' "$1" | sort -u
+}
+
+# .sops.yaml from the layout, and every existing store re-keyed to it where
+# its recipients differ (which needs the admin's key).  --check reports both
+# without changing anything; --rekey re-keys every store.
 secrets_sync() {
   in_repo
-  local check=0
-  case "${1:-}" in
-    --check) check=1 ;;
-    "") ;;
-    *) usage ;;
-  esac
+  local check=0 force=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --check) check=1 ;;
+      --rekey) force=1 ;;
+      *) usage ;;
+    esac
+    shift
+  done
 
+  # 1. the rules
   fleet_json sops | secrets_render >"$tmp/sops.yaml"
-
   if [ -f .sops.yaml ] && cmp -s "$tmp/sops.yaml" .sops.yaml; then
     echo ".sops.yaml is up to date"
+  elif [ "$check" = 1 ]; then
+    [ -f .sops.yaml ] && diff -u .sops.yaml "$tmp/sops.yaml" || true
+    die ".sops.yaml is stale; run fleetl secrets sync"
+  else
+    [ -f .sops.yaml ] && diff -u .sops.yaml "$tmp/sops.yaml" || true
+    install -m 644 "$tmp/sops.yaml" .sops.yaml
+    echo "wrote .sops.yaml"
+  fi
+
+  # 2. the stores: those whose recipients are not the rules'
+  local store stale=() failed=()
+  while IFS= read -r store; do
+    [ -f "$store" ] || continue
+    if [ "$force" = 1 ] || ! cmp -s <(rule_recipients "$store") <(store_recipients "$store"); then
+      stale+=("$store")
+    fi
+  done < <(fleet_json sops | jq -r '.stores[].path')
+  if [ "${#stale[@]}" = 0 ]; then
+    echo "every store has the recipients of its rule"
     return 0
   fi
   if [ "$check" = 1 ]; then
-    diff -u .sops.yaml "$tmp/sops.yaml" || true
-    die ".sops.yaml is stale; run fleetl secrets sync"
+    printf '%s: recipients differ from its rule\n' "${stale[@]}"
+    die "run fleetl secrets sync"
   fi
-
-  if [ -f .sops.yaml ]; then diff -u .sops.yaml "$tmp/sops.yaml" || true; fi
-  install -m 644 "$tmp/sops.yaml" .sops.yaml
-  echo "wrote .sops.yaml"
-
-  # Re-key every store that exists, so their data keys match the rules.
-  local store failed=()
-  while IFS= read -r store; do
-    if [ -f "$store" ]; then
-      echo "updating keys of $store"
-      sops updatekeys -y "$store" || failed+=("$store")
-    fi
-  done < <(fleet_json sops | jq -r '.stores[].path')
+  for store in "${stale[@]}"; do
+    echo "re-keying $store"
+    sops updatekeys -y "$store" || failed+=("$store")
+  done
   if [ "${#failed[@]}" -gt 0 ]; then
-    die "could not update the keys of: ${failed[*]}"
+    die "could not re-key: ${failed[*]}"
   fi
 }
 
