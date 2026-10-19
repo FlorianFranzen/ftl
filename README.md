@@ -16,9 +16,7 @@ delegates to them. Each `mk*` function can also be used on its own.
 
 Names: `ftl` is the library, its input and whatever lives on disk (`ftl-layers`,
 `ftl-layers.json`, `/var/lib/ftl`); `fleet` is every Nix namespace it owns: the
-`fleet.*` NixOS options, the `fleet` output and the `fleet` module argument. The
-former `ftl.*` options and the `ftlPeers`/`ftlManifest` outputs still work, with a
-warning, until the next release.
+`fleet.*` NixOS options, the `fleet` output and the `fleet` module argument.
 
 Missing folders are skipped. Folder names can be changed with
 `layout.<family> = "dir"`, or a family disabled with `null`. Unrecognized
@@ -49,7 +47,6 @@ each library function and module reads, provides and does.
   anywhere, including `imports`, to derive peers, scrape targets or DNS
   records from the host list. The same data is the `fleet.hosts` output, for
   anything outside a NixOS configuration (DNS, scripts, install tooling).
-  (`peers`, the argument's former name, is still passed as `fleet.hosts`.)
 
   ```nix
   # nixos/hosts/web/host.nix
@@ -237,9 +234,6 @@ Three things live under `nixos/` besides hosts, and they are easy to mix up:
   - `kind = "packages"`: added via `environment.profiles`;
   - `kind = "units"`: unit files linked in by a systemd generator, so an
     update needs only `daemon-reload` and a restart.
-
-  (The kinds were `apps` and `services`, and `units` was `services`, before
-  fleet services existed; the old names still work, with a warning.)
 
   Hosts list their layers in `host.nix`. Each layer's revision comes from
   `ftl-layers.json`: `latest`, or the commit it last built at. A host with

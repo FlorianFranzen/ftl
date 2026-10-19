@@ -40,8 +40,8 @@ module arguments use `fleet`.
 
 ### `lib/kinds.nix`
 
-- Provides: the layer kinds (`packages`, `units`) and `normalize`, which maps
-  the old names (`apps`, `services`) to them with a warning.
+- Provides: the layer kinds (`packages`, `units`) and `check`, which rejects
+  any other.
 - Used by `mkLayer`, `mkNixos` and `modules/layers.nix`, so a kind is
   normalised the same way wherever it is read.
 
@@ -103,7 +103,7 @@ it, and produces every host-related output.
   - `nixosConfigurations.<h>` (each with `fleetArgs`, the exact
     `nixosSystem` arguments, for VM tests), `nixosModules`, `nixosProfiles`,
     `nixosLayers.<sys>.<l>`, `nixosServices.<s>` (a service as a plain module);
-  - `peers`/`fleet.hosts` (every host's metadata: name, system, importance,
+  - `fleet.hosts` (every host's metadata: name, system, importance,
     layers, services, users, generators, keys, free-form data),
     `services`/`fleet.services`, `users`/`fleet.users`;
   - `sops.stores` (every store with its recipients: pgp and age keys, and the
@@ -123,7 +123,7 @@ it, and produces every host-related output.
      `fleet.layers.installed`, `fleet.secrets.file`/`ageKeyFile`,
      `networking.hostName` and `nixpkgs.hostPlatform`;
   4. the special arguments are `profiles`, `homes`, `static`, `fleet`
-     (`hosts`, `services`, `users`, `self`) and, for one release, `peers`.
+     (`hosts`, `services`, `users`, `self`).
 - Service modules: a module file is wrapped with `lib.setFunctionArgs` so
   that `service` (metadata, `role`, `dir`, `sopsFile`) is injected without
   the module system looking it up; `nixosServices.<s>` uses the same wrapper
@@ -174,8 +174,7 @@ it, and produces every host-related output.
   deep-merged into the outputs.
 - Provides: everything above as flake outputs, plus `fleet.sops` (stores +
   `extraRules`), `packages.<sys>.fleetl` and `generate-<g>`, `apps.<sys>.fleetl`,
-  `checks.<sys>.fleet-sops`, and the former `ftlPeers`/`ftlManifest` with a
-  warning.
+  `checks.<sys>.fleet-sops`.
 - How: decides statically which families exist (so touching one output never
   evaluates another's nixpkgs), builds the integration module
   (`modules/flake.nix`) and hands the home results to `mkNixos`.
@@ -184,7 +183,7 @@ it, and produces every host-related output.
 
 Every module is importable on its own (`ftl.nixosModules.<name>`); `mkNixos`
 imports all of them into every host and sets what it knows. Options live
-under `fleet.*`; the old `ftl.*` names are mirrored by `compat`.
+under `fleet.*`.
 
 | module | reads | provides | depends on being loaded by mkNixos? |
 |---|---|---|---|
@@ -199,7 +198,6 @@ under `fleet.*`; the old `ftl.*` names are mirrored by `compat`.
 | `state` | `fleet.state.<name>` (`path`, `kind`, `units`, `service`, `backup`, `snapshots`, `zfs.properties`), `fleet.storage` (`btrfsDevice`, `zfsPool`, `zfsProperties`) | the `fleet-state` service creating subvolumes/datasets, one mount unit per entry, `RequiresMountsFor` on its units, an assertion that its units run with fixed uids or `DynamicUser` | no |
 | `access` | `fleet.access.*` (`users` defaults to the host's fleet users, `sudo`, `knownHosts`, `initrdPort`); the `fleet` argument when present | accounts with keys and no password, sshd without passwords or root, sudo via pam_rssh, every host's keys in `known_hosts` | `users` and `knownHosts` need `fleet`; standalone, set `fleet.access.users` |
 | `secrets` | `fleet.secrets.*` (`file` and `ageKeyFile` set by mkNixos); whether sops-nix's module is present | `sops.defaultSopsFile`, `sops.age.keyFile`, `sops.gnupg.sshKeyPaths = []` | `file` comes from mkNixos; settable by hand |
-| `compat` | `options.fleet` | `options.ftl` mirroring every non-read-only option, definitions forwarded, one warning | no |
 | `scripts` (a function, not a module) | `pkgs` | the packaged scripts: `fleetl` (+`ftl` alias), `ftl-layers`, `ftl-status`, `ftl-pipeline`, `ftl-cache-retention` | no |
 
 ## Standalone use
@@ -237,15 +235,6 @@ arguments; stores need `root`.
   (`{ attr; rev; date; outPath; }`), the retention's input.
 - `.sops.yaml`: generated; `creation_rules` with one `path_regex` per store,
   `key_groups` of `pgp` fingerprints and `age` recipients.
-
-## Deprecations
-
-Kept for one release, each with a warning: the `ftl.*` options (mirrored by
-`compat`), the `ftlPeers` and `ftlManifest` outputs, `ftlArgs` on a
-configuration, the `peers` module argument, the layer kinds `apps` and
-`services` and the `services` attribute of a layer (`units`). ftl's own
-consumer, `ftl-pipeline.sh`, reads `fleet.manifest` and falls back to
-`ftlManifest` for repositories not yet moved.
 
 ## scripts/
 

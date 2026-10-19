@@ -33,9 +33,8 @@
 # metadata, `fleet.self` the host's own entry. It is built from host.nix alone,
 # without evaluating any configuration, so modules can use it anywhere (even in
 # imports) without infinite recursion, e.g. to derive mesh endpoints, scrape
-# targets or DNS records from the host list. `peers` (= `fleet.hosts`) is the
-# argument's former name. `fleet.services.<name>` is every service's metadata
-# the same way.
+# targets or DNS records from the host list. `fleet.services.<name>` is every
+# service's metadata the same way.
 #
 # `fleet.users.<name>` is every user (see mkUsers) with the hosts it has an
 # account on resolved: an admin is on every host, anyone else on the hosts
@@ -558,7 +557,7 @@ let
 
   hosts' = builtins.mapAttrs normalizeHost hostSpecs;
 
-  # Every host's metadata, as seen by every host, itself included (`peers` argument).
+  # Every host's metadata, as seen by every host, itself included (`fleet.hosts`).
   peers = builtins.mapAttrs (
     hostName: host:
     host.data
@@ -585,8 +584,7 @@ let
     )
   ) layers';
 
-  layerKind =
-    layerName: kinds.normalize "layer '${layerName}'" (layers'.${layerName}.kind or "packages");
+  layerKind = layerName: kinds.check "layer '${layerName}'" (layers'.${layerName}.kind or "packages");
 
   nixosLayers = lib.genAttrs (lib.unique (lib.flatten (builtins.attrValues layerSystems))) (
     system:
@@ -599,7 +597,6 @@ let
           kind = layerKind layerName;
           packages = def.packages or [ ];
           units = def.units or { };
-          services = def.services or null;
         }
       )
       (lib.filterAttrs (layerName: _: builtins.elem system layerSystems.${layerName}) layers')
@@ -652,7 +649,6 @@ let
       profiles
       homes
       static
-      peers
       ;
   };
 
@@ -676,11 +672,7 @@ let
 
   nixosConfigurations = builtins.mapAttrs (
     _: a:
-    nixpkgs.lib.nixosSystem a
-    // {
-      fleetArgs = a;
-      ftlArgs = lib.warn "ftl: `ftlArgs` is called `fleetArgs` now" a;
-    }
+    nixpkgs.lib.nixosSystem a // { fleetArgs = a; }
   ) systemArgs;
 
   # --- checks and manifest ---------------------------------------------------
@@ -737,7 +729,6 @@ assert builtins.all builtins.isAttrs (builtins.attrValues users');
     nixosServices
     checks
     manifestEntries
-    peers
     fleet
     sops
     generators

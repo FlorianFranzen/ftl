@@ -47,7 +47,7 @@
         nixos-layer-gaming = mk "nixos-layer-gaming" (broken "break-gaming");
       };
 
-      ftlManifest = {
+      fleet.manifest = {
         name = "fixture";
         repo = null;
         version = 1;

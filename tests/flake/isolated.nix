@@ -32,7 +32,6 @@ check "flake-isolated" (
       expr = outputs "pkgs";
       expected = [
         "fleet"
-        "ftlManifest"
         "legacyPackages"
         "overlays"
         "packages"
@@ -45,8 +44,6 @@ check "flake-isolated" (
         "apps"
         "checks"
         "fleet"
-        "ftlManifest"
-        "ftlPeers"
         "nixosConfigurations"
         "nixosLayers"
         "nixosModules"
@@ -66,7 +63,6 @@ check "flake-isolated" (
       expected = [
         "checks"
         "fleet"
-        "ftlManifest"
         "homeConfigurations"
         "homeModules"
         "homeProfiles"
@@ -82,17 +78,11 @@ check "flake-isolated" (
     # static/ and users/ produce no outputs of their own
     testStaticOnly = {
       expr = outputs "static";
-      expected = [
-        "fleet"
-        "ftlManifest"
-      ];
+      expected = [ "fleet" ];
     };
     testUsersOnly = {
       expr = outputs "users";
-      expected = [
-        "fleet"
-        "ftlManifest"
-      ];
+      expected = [ "fleet" ];
     };
 
     testManifestPerFamily = {

@@ -42,7 +42,7 @@ let
               mkdir -p $u/multi-user.target.wants $out/share/ftl-layer
               printf '[Unit]\nDescription=ftl demo\n[Service]\nExecStart=${sh} -c "echo svc-''${svcVer} > /run/ftl-demo; exec ${cu}/sleep infinity"\n[Install]\nWantedBy=multi-user.target\n' > $u/ftl-demo.service
               ln -s ../ftl-demo.service $u/multi-user.target.wants/ftl-demo.service
-              echo '{"name":"svc","kind":"services","units":["ftl-demo.service"]}' > $out/share/ftl-layer/meta.json
+              echo '{"name":"svc","kind":"units","units":["ftl-demo.service"]}' > $out/share/ftl-layer/meta.json
             ''');
           };
         };

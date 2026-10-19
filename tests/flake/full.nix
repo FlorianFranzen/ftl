@@ -59,8 +59,6 @@ check "flake-full" (
         "apps"
         "checks"
         "fleet"
-        "ftlManifest"
-        "ftlPeers"
         "homeConfigurations"
         "homeModules"
         "homeProfiles"

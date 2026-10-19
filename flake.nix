@@ -21,8 +21,6 @@
         state = ./modules/state.nix;
         access = ./modules/access.nix;
         secrets = ./modules/secrets.nix;
-        # ftl.* -> fleet.* option aliases
-        compat = ./modules/compat.nix;
         default.imports = import ./modules/all.nix;
       };
 

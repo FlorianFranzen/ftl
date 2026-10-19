@@ -102,7 +102,7 @@ check "unit-nixos" (
 
     # free-form host.nix attributes become peer data, reserved ones are not repeated
     testPeers = {
-      expr = n.peers;
+      expr = n.fleet.hosts;
       expected = {
         alpha = {
           name = "alpha";
@@ -526,7 +526,7 @@ check "unit-nixos" (
     };
 
     # every host sees all hosts (itself included) as `fleet.hosts`, itself as
-    # `fleet.self`, and can use them in imports; `peers` is the old name
+    # `fleet.self`, and can use them in imports
     testFleetArg = {
       expr =
         (ftl.lib.mkNixos {
@@ -535,21 +535,16 @@ check "unit-nixos" (
           sharedModules = [ home-manager.nixosModules.home-manager ];
           hosts.gamma.modules = [
             (
-              {
-                fleet,
-                peers,
-                lib,
-                ...
-              }:
+              { fleet, lib, ... }:
               {
                 imports = lib.optional (fleet.hosts ? alpha) {
-                  environment.etc.peer.text = "${fleet.hosts.alpha.fqdn} ${fleet.self.name} ${peers.alpha.fqdn}";
+                  environment.etc.peer.text = "${fleet.hosts.alpha.fqdn} ${fleet.self.name}";
                 };
               }
             )
           ];
         }).nixosConfigurations.gamma.config.environment.etc.peer.text;
-      expected = "alpha.example.org gamma alpha.example.org";
+      expected = "alpha.example.org gamma";
     };
 
     # explicit host specs carry data too, and `name` is reserved
@@ -558,7 +553,7 @@ check "unit-nixos" (
         (ftl.lib.mkNixos {
           inherit nixpkgs;
           hosts.delta.address = "192.0.2.4";
-        }).peers.delta.address;
+        }).fleet.hosts.delta.address;
       expected = "192.0.2.4";
     };
     testPeersReservedName = {
@@ -652,45 +647,18 @@ check "unit-nixos" (
       expected = true;
     };
 
-    # the old option names still work, with a warning
-    testOptionAliases = {
+    # a layer kind is packages or units
+    testLayerKindInvalid = {
       expr =
-        let
-          c =
-            (ftl.lib.mkNixos {
-              inherit nixpkgs;
-              hosts.delta.modules = [
-                {
-                  ftl.layers.repo = "file:///old-name";
-                  ftl.client.gc.dates = "monthly";
-                }
-              ];
-            }).nixosConfigurations.delta.config;
-        in
-        {
-          repo = c.fleet.layers.repo;
-          dates = c.fleet.client.gc.dates;
-          warned = builtins.length c.warnings;
-        };
-      expected = {
-        repo = "file:///old-name";
-        dates = "monthly";
-        warned = 1;
-      };
-    };
-
-    # the old kind names of layers are accepted, and normalized
-    testLayerKindAliases = {
-      expr =
-        (ftl.lib.mkNixos {
+        !(builtins.tryEval (ftl.lib.mkNixos {
           inherit nixpkgs;
           hosts.delta.layers = [ "old" ];
           layers.old = {
             kind = "apps";
             packages = [ ];
           };
-        }).nixosConfigurations.delta.config.fleet.layers.installed.old.kind;
-      expected = "packages";
+        }).nixosConfigurations.delta.config.fleet.layers.installed.old.kind).success;
+      expected = true;
     };
 
     testCheckNames = {

@@ -9,5 +9,4 @@
   ./state.nix
   ./access.nix
   ./secrets.nix
-  ./compat.nix
 ]

@@ -7,10 +7,6 @@
 #   lib/systemd/system/<unit>         generated service units (units kind)
 #   lib/systemd/system/<t>.wants/<u>  install links for WantedBy targets
 #   share/ftl-layer/meta.json         { name, kind, units }
-#
-# The kinds were called "apps" and "services" (and the units attribute
-# "services") before fleet services existed; the old names are still accepted
-# with a warning.
 {
   pkgs,
   name,
@@ -22,17 +18,12 @@
   #   wantedBy ? [ "multi-user.target" ]; serviceConfig ? { };
   # }
   units ? { },
-  services ? null,
 }:
 let
   lib = pkgs.lib;
   kinds = import ./kinds.nix lib;
-  kind' = kinds.normalize "layer '${name}'" kind;
-  units' =
-    if services == null then
-      units
-    else
-      lib.warn "ftl: layer '${name}': `services` is called `units` now" (units // services);
+  kind' = kinds.check "layer '${name}'" kind;
+  units' = units;
 
   packages' = if builtins.isFunction packages then packages pkgs else packages;
 

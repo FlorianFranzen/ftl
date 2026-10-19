@@ -206,9 +206,7 @@ fi
 log "candidate $candidate (lock bumped: $bumped)"
 
 # --- evaluate manifest ------------------------------------------------------
-# fleet.manifest; ftlManifest is its name before the fleet outputs
-if ! { nix eval --json .#fleet.manifest 2>"$state/eval-error.log" ||
-       nix eval --json .#ftlManifest 2>>"$state/eval-error.log"; } >"$state/manifest.json"; then
+if ! nix eval --json .#fleet.manifest >"$state/manifest.json" 2>"$state/eval-error.log"; then
   log "manifest evaluation failed"
   notify "manifest evaluation FAILED at $candidate: $(tail -c 500 "$state/eval-error.log")"
   finish "eval-failed" false
