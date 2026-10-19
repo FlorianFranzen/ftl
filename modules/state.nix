@@ -283,8 +283,9 @@ in
       tool = {
         enable = lib.mkOption {
           type = lib.types.bool;
-          default = entries != { } || zfs;
-          defaultText = lib.literalExpression "fleet.state != { } || fleet.storage.zfsPool != null";
+          # a host keeps it after its last entry moved away when it has backups or ZFS
+          default = entries != { } || zfs || (config.fleet.backup.enable or false);
+          defaultText = lib.literalExpression "fleet.state != { } || fleet.storage.zfsPool != null || fleet.backup.enable";
           description = ''
             Install fleet-state, the host's tool for snapshots, backups,
             restores and moves of its entries.  A host that a service with
@@ -321,6 +322,23 @@ in
     (lib.mkIf (storage.tool.enable && hasStorage) {
       environment.systemPackages = [ tool ];
       environment.etc."fleet-state/state.json".text = stateJson;
+    })
+    (lib.mkIf hasStorage {
+      # fleet-state blocks an entry's units with drop-ins in /run while it is
+      # stopped or frozen; a configuration without the entry lifts them
+      system.activationScripts.fleet-state-blocks = lib.stringAfter [ "etc" ] ''
+        for record in /run/fleet-state/*.blocked; do
+          [ -e "$record" ] || continue
+          name="$(basename "$record" .blocked)"
+          if ! ${pkgs.jq}/bin/jq -e --arg n "$name" '.entries | has($n)' /etc/fleet-state/state.json >/dev/null 2>&1; then
+            while IFS= read -r unit; do
+              rm -f "/run/systemd/system/$unit.d/fleet-state-$name.conf"
+              rmdir "/run/systemd/system/$unit.d" 2>/dev/null || true
+            done <"$record"
+            rm -f "$record" "/run/fleet-state/$name.stopped"
+          fi
+        done
+      '';
     })
     (lib.mkIf (entries != { }) {
       assertions = [

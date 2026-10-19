@@ -149,7 +149,8 @@ each library function and module reads, provides and does.
                                   a command on a host, or on every host that is
                                   not ignored, pinned to its ssh.pub
   fleetl host show | service show | user show <name>
-  fleetl service move <service> <to> [--from <host>] [--without-data] [--no-backup] [--yes]
+  fleetl service move <service> <to> [--from <host>] [--via stream|backup]
+                     [--without-data] [--no-backup] [--yes]
                                   the service and its state to another host
   fleetl state list | snapshots <host> [<entry>]
   fleetl state size | stop | start <host> <entry>...
@@ -304,9 +305,24 @@ Three things live under `nixos/` besides hosts, and they are easy to mix up:
   target's datasets are there before its deploy, so it starts on its
   state, never on an empty one. `--from` picks the host of a service on
   several, `--without-data` leaves the `data` entries behind (copy them
-  later, or obtain them again), `--no-backup` skips the last backup. The
-  target needs `fleet-state` before it has entries of its own:
-  `fleet.storage.tool.enable` on a host without a ZFS pool or entries.
+  later, or obtain them again), `--no-backup` skips the last backup.
+
+  `--via backup` takes the backed-up entries through the backup instead of
+  the admin's machine: the target restores the last backup straight from
+  the old host's repository. The repository's profile and credentials
+  (`fleet.backup.passwordFile`, `credentialFiles`) are piped from the old
+  host to the target, kept there in a `0700` directory in `/run` for the
+  restore (paths in the profile pointed into it, no rustic cache) and
+  removed after; the target needs the repository's transport and its host
+  key (as a host with backups to the same place has). Entries that are
+  not backed up are streamed as before.
+
+  The target needs `fleet-state` before it has entries of its own; it is
+  there with any entry, a ZFS pool or backups, else set
+  `fleet.storage.tool.enable`. A host whose last entry moved away keeps it
+  likewise; when it would not, the move says so, and the frozen copies are
+  dropped before that host is deployed (`drop` takes an entry still
+  declared once it is frozen, and blocks its mount until the deploy).
 
   ```nix
   fleet.backup = {
@@ -445,7 +461,9 @@ see whether the library still works with the channel's current head:
     refusals, a failed move undone without touching what was in the way,
     then a move whose target, once switched to the moved configuration,
     runs the service on the received state (content, owners, xattrs, ZFS
-    properties), and whose source lets go and drops its frozen copy;
+    properties), a move `--via backup` restored on the target from the
+    source's sftp repository with no credentials left behind, and a source
+    that lets go and drops its frozen copies, one before its deploy;
   - `services`: `fleet.secrets` with sops-nix for real: a host decrypts its own
     store and a service's with its SSH host key, no age key installed;
   - `layers`: layer install, update, pins and rollback, plus the comin hook;

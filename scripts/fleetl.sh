@@ -17,11 +17,13 @@
 #                                       is not ignored), pinned to its ssh.pub
 #   fleetl host show <name>             a host: services, users, layers, keys, stores
 #   fleetl service show <name>          a service: hosts, roles, layers, data, store
-#   fleetl service move <name> <to> [--from <host>] [--without-data] [--no-backup] [--yes]
+#   fleetl service move <name> <to> [--from <host>] [--via stream|backup]
+#                       [--without-data] [--no-backup] [--yes]
 #                                       move a service with its state: service.nix
 #                                       edited, its entries stopped, backed up and
-#                                       streamed to <to>, frozen on <from>, the stores
-#                                       re-keyed; then commit and deploy both
+#                                       streamed to <to> (or restored there from that
+#                                       backup), frozen on <from>, the stores re-keyed;
+#                                       then commit and deploy both
 #   fleetl state list <host>            the host's state entries, and copies kept aside
 #   fleetl state size|stop|start <host> <entry>...
 #   fleetl state snapshots <host> [<entry>]
@@ -654,7 +656,8 @@ host_backup_on() { # <host>
   [ "$(nix eval --json ".#nixosConfigurations.\"$1\".config.fleet.backup.enable" 2>/dev/null)" = true ]
 }
 
-# fleetl service move <service> <to> [--from <host>] [--without-data] [--no-backup] [--yes]
+# fleetl service move <service> <to> [--from <host>] [--via stream|backup]
+#                     [--without-data] [--no-backup] [--yes]
 #
 #   1. checks: where the service runs and its state there, that <to> has
 #      fleet-state and none of the entries, the sizes; asks.
@@ -662,7 +665,10 @@ host_backup_on() { # <host>
 #      evaluating it again; anything else changing is refused).
 #   3. on <from>: the entries stopped (and blocked), a last backup of those
 #      backed up, each entry streamed into <to> (fleet-state send | receive,
-#      through this machine), the entries frozen: read-only, units blocked.
+#      through this machine) or, with --via backup, restored on <to> from
+#      that last backup (the source's repository credentials piped to <to>
+#      for the time of the restore; entries not backed up are streamed), the
+#      entries frozen: read-only, units blocked.
 #   4. secrets sync: the service's store re-keyed for <to>.
 #   On a failure before the end everything is undone: service.nix back, what
 #   reached <to> dropped, the entries started again on <from>.  Afterwards:
@@ -670,13 +676,18 @@ host_backup_on() { # <host>
 #   then `fleetl state drop <from> <entry> <kind>` for the frozen copies.
 service_move() {
   in_repo
-  local svc="${1:?usage: fleetl service move <service> <to> [--from <host>] [--without-data] [--no-backup] [--yes]}"
-  local to="${2:?usage: fleetl service move <service> <to> [--from <host>] [--without-data] [--no-backup] [--yes]}"
+  local usage="usage: fleetl service move <service> <to> [--from <host>] [--via stream|backup] [--without-data] [--no-backup] [--yes]"
+  local svc="${1:?$usage}" to="${2:?$usage}"
   shift 2
-  local from="" nodata=0 nobackup=0 yes=0
+  local from="" via=stream nodata=0 nobackup=0 yes=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --from) from="${2:?--from needs a host}"; shift ;;
+      --via)
+        via="${2:?--via needs stream or backup}"
+        [ "$via" = stream ] || [ "$via" = backup ] || die "--via: stream or backup"
+        shift
+        ;;
       --without-data) nodata=1 ;;
       --no-backup) nobackup=1 ;;
       --yes) yes=1 ;;
@@ -718,6 +729,9 @@ service_move() {
   if [ "$nobackup" = 0 ] && [ "${#names[@]}" -gt 0 ] && host_backup_on "$from"; then
     mapfile -t backups < <(jq -r 'to_entries[] | select(.value.backup) | .key' <<<"$entries")
   fi
+  if [ "$via" = backup ] && [ "${#backups[@]}" = 0 ] && [ "${#names[@]}" -gt 0 ]; then
+    die "--via backup needs $from's backups of the entries (fleet.backup there, and no --no-backup)"
+  fi
   if [ "${#names[@]}" -gt 0 ]; then
     as_root "$to" fleet-state list >/dev/null ||
       die "fleet-state does not work on $to: set fleet.storage.tool.enable there (with fleet.storage) and deploy it first"
@@ -735,6 +749,11 @@ service_move() {
       "  \($k)\t\(.value.kind)\t\(.value.path)\t\(($sz[$k] // 0) / 1048576 | floor) MiB\t\(if ($moving | contains(" " + $k + " ")) then "moves" else "stays (--without-data)" end)"' \
       <<<"$entries" | column -t -s $'\t'
     echo "  ${#backups[@]} of them backed up on $from first"
+    if [ "$via" = backup ]; then
+      echo "  those restored on $to from that backup, the others streamed"
+    else
+      echo "  streamed from $from to $to through this machine"
+    fi
     echo "  $svc is down on $from from now until $to runs the new configuration"
   fi
   if [ "$yes" = 0 ]; then
@@ -774,7 +793,12 @@ service_move() {
     local name kind
     for name in "${moving[@]}"; do
       kind="$(jq -r --arg n "$name" '.[$n].kind' <<<"$entries")"
-      as_root "$from" fleet-state send "$name" | as_root "$to" fleet-state receive "$name" "$kind"
+      if [ "$via" = backup ] && [[ " ${backups[*]} " == *" $name "* ]]; then
+        as_root "$from" fleet-state access "$kind" |
+          as_root "$to" fleet-state receive "$name" "$kind" --from-backup "$from"
+      else
+        as_root "$from" fleet-state send "$name" | as_root "$to" fleet-state receive "$name" "$kind"
+      fi
       # only what this move made is dropped again (a receive that fails
       # removes its own leftovers, and never touches what was there)
       move_undo+=("as_root '$to' fleet-state drop '$name' '$kind'")
@@ -798,6 +822,10 @@ Next:
   deploy $from                  the service goes; its frozen copy stays
 EOF
   if [ "${#names[@]}" -gt 0 ]; then
+    if [ "$(nix eval --json ".#nixosConfigurations.\"$from\".config.fleet.storage.tool.enable" 2>/dev/null)" = false ]; then
+      echo "  ! $from has no fleet-state once deployed (no entries left, no backups, no ZFS):"
+      echo "    drop the frozen copies before deploying $from, or set fleet.storage.tool.enable there"
+    fi
     echo "  fleetl state drop $from <entry> <kind>   once $to runs well, for each of:"
     jq -r 'to_entries[] | "    \(.key) \(.value.kind)"' <<<"$entries"
   fi

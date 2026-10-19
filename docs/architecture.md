@@ -214,7 +214,7 @@ under `fleet.*`.
 | `client` | `fleet.client.*` | substituters, gc defaults, `ftl-status` | no |
 | `layers` | `fleet.layers.*` (`installed` set by mkNixos, `repo`, `verify`, timer) | `environment.profiles` for packages layers, a systemd generator linking units layers, `ftl-layers` and its update service and timer, `fleet.layers.hook` | `installed` comes from mkNixos; settable by hand |
 | `comin` | `fleet.comin.*`, whether comin's and lanzaboote's modules are present | `services.comin.postDeploymentCommand` = the hook (system profile sync for lanzaboote, then layer update) | no |
-| `state` | `fleet.state.<name>` (`path`, `kind`, `units`, `service`, `backup`, `snapshots`, `zfs.properties`), `fleet.storage` (`btrfsDevice`, `zfsPool`, `zfsProperties`, `tool.enable`) | the `fleet-state` service creating subvolumes/datasets, one mount unit per entry, `RequiresMountsFor` on its units, an assertion that its units run with fixed uids or `DynamicUser`; the `fleet-state` tool and `/etc/fleet-state/state.json` (backend, device or pool, host, entries) | no |
+| `state` | `fleet.state.<name>` (`path`, `kind`, `units`, `service`, `backup`, `snapshots`, `zfs.properties`), `fleet.storage` (`btrfsDevice`, `zfsPool`, `zfsProperties`, `tool.enable`), `fleet.backup.enable` | the `fleet-state` service creating subvolumes/datasets, one mount unit per entry, `RequiresMountsFor` on its units, assertions (fixed uids or `DynamicUser`, entry names); the `fleet-state` tool and `/etc/fleet-state/state.json` (backend, device or pool, host, entries with ZFS properties) where there are entries, a ZFS pool or backups; an activation snippet lifting the blocks of entries no longer declared | no |
 | `backup` | `fleet.backup.*` (`repositories.<kind>`, `passwordFile`, `credentialFiles`, `packages`, `schedule`, `retention`, `metrics.textfileDir`), `fleet.state` | `/etc/rustic/<kind>.toml` (also `fleet.backup.profiles`), `/etc/fleet-state/backup.json`, the `fleet-backup` service and timer (`fleet-state backup --all`), `fleet-backup-init` | no |
 | `access` | `fleet.access.*` (`users` defaults to the host's fleet users, `sudo`, `knownHosts`, `initrdPort`); the `fleet` argument when present | accounts with keys and no password, sshd without passwords or root, sudo via pam_rssh, every host's keys in `known_hosts` | `users` and `knownHosts` need `fleet`; standalone, set `fleet.access.users` |
 | `secrets` | `fleet.secrets.*` (`file`, `shared` and `ageKeyFile` set by mkNixos); whether sops-nix's module is present | `sops.defaultSopsFile`, `sops.age.keyFile`, `sops.gnupg.sshKeyPaths = []`; `shared` for modules to point a secret at | `file` comes from mkNixos; settable by hand |
@@ -280,7 +280,8 @@ arguments; stores need `root`.
   `nixosConfigurations.<h>.config.fleet.state` and the new host's for
   collisions, edits `service.nix` with a string replacement it checks by
   evaluating `fleet.services` again, then drives `fleet-state` on both
-  hosts (`stop`, `backup`, `send | receive`, `freeze`) and `secrets sync`,
+  hosts (`stop`, `backup`, `send | receive` or with `--via backup`
+  `access | receive --from-backup`, `freeze`) and `secrets sync`,
   recording an undo step after each step that succeeded. Temporary directories are `0700` and
   removed on any exit.
 - `fleet-state.sh` (hosts, as root; packaged by `modules/state.nix` with the
@@ -313,8 +314,14 @@ arguments; stores need `root`.
     refused if the location exists, unless `--replace`), the entry need not
     be declared; `freeze` quiesces (unless a `stop` did) and sets the
     dataset or subvolume read-only; `thaw` undoes it; `drop` destroys the
-    location of an entry the host no longer declares, with its leftover
-    snapshots and blocks.
+    location of an entry the host no longer declares (or still declares
+    but froze, blocking its mount too), with its leftover snapshots and
+    blocks. `access` writes a kind's rustic profile, `credentials.json`
+    and the credential files as a tar; `receive --from-backup <host>` reads
+    that on stdin into a `0700` directory below the scratch space in `/run`,
+    replaces each credential path in the profile (quoted, literally) by its
+    copy, finds `<host>`'s latest backup of the entry (or `--snapshot`)
+    with `RUSTIC_NO_CACHE`, and restores it into `.incoming`.
   - Snapshots, mounts and scratch space are undone on any exit, signals
     included; one changing run at a time (`/run/fleet-state.lock`).
 - `ftl-layers.sh` (hosts): environment from `modules/layers.nix`

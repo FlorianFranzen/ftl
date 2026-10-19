@@ -32,12 +32,21 @@
 #                                          subvolume for the entry, which this host need
 #                                          not declare yet; an existing one is refused,
 #                                          or with --replace swapped out and kept aside
+#   fleet-state access <kind>              the repository of a kind, as a tar stream on
+#                                          stdout: its profile and the credentials it
+#                                          reads, for a restore on another host
+#   fleet-state receive <entry> <kind> --from-backup <host> [--snapshot <id>] [--replace]
+#                                          the same, but restored from <host>'s backup of
+#                                          the entry, with access to its repository (see
+#                                          access) on stdin, kept in a 0700 directory in
+#                                          /run for the restore and removed after
 #   fleet-state freeze <entry>...          stopped, blocked and read-only: the copy left
 #                                          behind cannot change any more (until a reboot
 #                                          lifts the block, the read-only stays)
 #   fleet-state thaw <entry>...            undo freeze
-#   fleet-state drop <entry> <kind>        destroy what a move left behind of an entry
-#                                          this host no longer declares
+#   fleet-state drop <entry> <kind>        destroy what a move left behind: an entry this
+#                                          host no longer declares, or one it still
+#                                          declares but froze
 #
 # What the host keeps is described by /etc/fleet-state/state.json (written by
 # the state module), its backups by /etc/fleet-state/backup.json and the rustic
@@ -823,11 +832,52 @@ cmd_send() {
   tar -C "$snapdir" -c "${tar_flags[@]}" -f - .
 }
 
+# The repository's profile and the files it reads (password, key), for a
+# restore elsewhere: the credentials go no further than the pipe.
+cmd_access() {
+  [ $# = 1 ] || usage
+  local kind="$1" dir name path
+  need_backup
+  jq -e --arg k "$kind" '.kinds | index($k)' "$backup_json" >/dev/null || die "no repository for kind $kind"
+  [ ! -t 1 ] || die "access writes a tar stream with credentials; pipe it to fleet-state receive"
+  dir="$scratch/access"
+  mkdir -m 700 "$dir" "$dir/files"
+  cat "$(profile "$kind").toml" >"$dir/profile.toml"
+  jq '.credentials' "$backup_json" >"$dir/credentials.json"
+  while IFS=$'\t' read -r name path; do
+    (umask 077; cat "$path" >"$dir/files/$name")
+  done < <(jq -r '.credentials | to_entries[] | [.key, .value] | @tsv' "$backup_json")
+  log "access to the $kind repository of $host"
+  tar -C "$dir" -c -f - .
+}
+
+# The access on stdin unpacked into a private directory, the profile's
+# credential paths pointed into it; the profile's path (without .toml) in
+# $access_profile.  rustic keeps no cache of the foreign repository.
+access_profile=""
+take_access() {
+  local dir="$scratch/access" name path profile
+  mkdir -m 700 "$dir"
+  tar -C "$dir" -x --no-same-owner -f -
+  [ -f "$dir/profile.toml" ] && [ -f "$dir/credentials.json" ] || die "no repository access on stdin (fleet-state access)"
+  profile="$(cat "$dir/profile.toml")"
+  while IFS=$'\t' read -r name path; do
+    [ -f "$dir/files/$name" ] || die "the access lacks $name"
+    profile="${profile//"\"$path\""/"\"$dir/files/$name\""}"
+  done < <(jq -r 'to_entries[] | [.key, .value] | @tsv' "$dir/credentials.json")
+  printf '%s\n' "$profile" >"$dir/profile.toml"
+  chmod -R go= "$dir"
+  export RUSTIC_NO_CACHE=true
+  access_profile="$dir/profile"
+}
+
 cmd_receive() {
-  local name="" kind="" replace=0
+  local name="" kind="" replace=0 from="" want=latest
   while [ $# -gt 0 ]; do
     case "$1" in
       --replace) replace=1 ;;
+      --from-backup) from="${2:?--from-backup needs a host}"; shift ;;
+      --snapshot) want="${2:?--snapshot needs an id}"; shift ;;
       -*) usage ;;
       *)
         if [ -z "$name" ]; then
@@ -843,9 +893,9 @@ cmd_receive() {
   done
   [ -n "$kind" ] || usage
   [[ $name =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || die "'$name' is not an entry name"
-  [ ! -t 0 ] || die "receive reads a tar stream (fleet-state send) on stdin"
+  [ ! -t 0 ] || die "receive reads a tar stream (fleet-state send or access) on stdin"
 
-  local loc incoming
+  local loc incoming id="" spath=""
   loc="$(location_of "$name" "$kind")"
   if has_entry "$name" && [ "$(field "$name" location)" != "$loc" ]; then
     die "$name is declared here as $(field "$name" location), not $loc"
@@ -855,6 +905,13 @@ cmd_receive() {
   if location_exists "$loc" && [ "$replace" = 0 ]; then
     die "$loc exists on $host (--replace swaps it out and keeps it aside)"
   fi
+  if [ -n "$from" ]; then
+    take_access
+    id="$(find_snapshot "$access_profile" "$name" "$from" "$want")"
+    [ -n "$id" ] || die "$name: no backup '$want' of $from in that repository"
+    spath="$(rustic -P "$access_profile" snapshots --json --filter-host "$from" --filter-label "$name" |
+      jq -r --arg id "$id" '[.[].snapshots[] | select(.id == $id)][0].paths[0]')"
+  fi
   incoming="$loc.incoming"
   if location_exists "$incoming"; then
     log "$name: removing an incomplete receive ($incoming)"
@@ -863,8 +920,13 @@ cmd_receive() {
   create_location "$incoming"
   cleanups+=("destroy_if_exists '$incoming'")
   open_location "$incoming"
-  log "$name: receiving into $loc"
-  tar -C "$opened" -x "${tar_flags[@]}" --same-permissions -f -
+  if [ -n "$from" ]; then
+    log "$name: restoring ${id:0:8}, $from's backup of $spath, into $loc"
+    rustic -P "$access_profile" restore --no-progress --numeric-id "$id:$spath" "$opened"
+  else
+    log "$name: receiving into $loc"
+    tar -C "$opened" -x "${tar_flags[@]}" --same-permissions -f -
+  fi
   close_location "$opened"
   place "$name" "$incoming" "$loc"
 }
@@ -930,13 +992,35 @@ cmd_thaw() {
   resume "$@"
 }
 
+is_frozen() { # <location>
+  if [ "$backend" = zfs ]; then
+    [ "$(zfs get -H -o value readonly "$1")" = on ]
+  else
+    [ "$(btrfs property get -ts "$top/$1" ro)" = ro=true ]
+  fi
+}
+
 cmd_drop() {
   [ $# = 2 ] || usage
   local name="$1" kind="$2" loc m snap
-  ! has_entry "$name" || die "$name is still declared on $host; drop is for what a move left behind"
   loc="$(location_of "$name" "$kind")"
   lock
   location_exists "$loc" || die "no $loc on $host"
+  if has_entry "$name"; then
+    # still declared (the host is not deployed yet): only once frozen, and
+    # its mount blocked too, so that nothing mounts an empty one meanwhile
+    is_frozen "$loc" || die "$name is declared on $host and not frozen; drop is for what a move left behind"
+    local mnt
+    local -a blocked
+    mnt="$(mount_unit "$(field "$name" path)")"
+    if [ -f "$records/$name.blocked" ]; then
+      mapfile -t blocked <"$records/$name.blocked"
+    else
+      blocked=()
+    fi
+    block "$name" "${blocked[@]}" "$mnt"
+    systemctl stop "$mnt"
+  fi
   # unmounted wherever it is still mounted
   if [ "$backend" = zfs ]; then
     while IFS= read -r m; do
@@ -950,11 +1034,15 @@ cmd_drop() {
       if [ -e "$snap" ]; then btrfs subvolume delete "$snap" >/dev/null; fi
     done
   fi
-  # a freeze's block, if the host has not rebooted since
-  unblock "$name"
-  rm -f "$records/$name.stopped"
   destroy_location "$loc"
-  log "$name: $loc destroyed"
+  if has_entry "$name"; then
+    log "$name: $loc destroyed; its units stay blocked until this host is deployed without it"
+  else
+    # a freeze's block, if the host has not rebooted since
+    unblock "$name"
+    rm -f "$records/$name.stopped"
+    log "$name: $loc destroyed"
+  fi
 }
 
 # --- listing -------------------------------------------------------------------
@@ -1006,6 +1094,7 @@ case "$1" in
   rollback) shift; cmd_rollback "$@" ;;
   discard) shift; cmd_discard "$@" ;;
   send) shift; cmd_send "$@" ;;
+  access) shift; cmd_access "$@" ;;
   receive) shift; cmd_receive "$@" ;;
   freeze) shift; cmd_freeze "$@" ;;
   thaw) shift; cmd_thaw "$@" ;;

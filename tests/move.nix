@@ -4,7 +4,9 @@
 # configurations; everything else is real: ssh to the hosts as root,
 # fleet-state on them, the stream between them through the admin machine.
 # Deploying the moved configuration is a switch to a specialisation: on dst
-# one that declares web, on src one without it.
+# one that declares web and api, on src one without them.  src backs up to
+# `box` over sftp, so that api can move --via backup: dst restores it from
+# src's repository with src's credentials, handed over for the restore.
 { pkgs, ftl }:
 let
   lib = pkgs.lib;
@@ -96,6 +98,11 @@ let
         mode = "0600";
       };
       users.users.root.openssh.authorizedKeys.keys = [ sshKeys.snakeOilPublicKey ];
+      # every host with backups trusts the box (as a fleet would pin it)
+      programs.ssh.knownHosts.box = {
+        hostNames = [ "box" ];
+        publicKey = sshKeys.snakeOilEd25519PublicKey;
+      };
       users.users.web = {
         isSystemUser = true;
         group = "web";
@@ -164,12 +171,30 @@ pkgs.testers.runNixOSTest {
       test.api = true;
       fleet.backup = {
         enable = true;
-        repositories.state.repository = "/var/backup/state";
+        repositories.state = {
+          repository = "opendal:sftp";
+          options = {
+            endpoint = "ssh://backup@box:22";
+            user = "backup";
+            key = "/etc/backup-key";
+            root = "/srv/backup/state";
+            known_hosts_strategy = "Strict";
+          };
+        };
         passwordFile = "/etc/backup-password";
+        credentialFiles.ssh-key = "/etc/backup-key";
+        packages = [ pkgs.openssh ];
       };
       environment.etc."backup-password".text = "test";
-      # deploying the repository after the move: web is gone
-      specialisation.moved.configuration.test.web = lib.mkForce false;
+      environment.etc."backup-key" = {
+        source = sshKeys.snakeOilPrivateKey;
+        mode = "0600";
+      };
+      # deploying the repository after the move: web and api are gone
+      specialisation.moved.configuration.test = {
+        web = lib.mkForce false;
+        api = lib.mkForce false;
+      };
     };
 
   nodes.dst =
@@ -180,8 +205,35 @@ pkgs.testers.runNixOSTest {
       boot.zfs.forceImportRoot = false;
       networking.hostId = "8425e349";
       fleet.storage.zfsPool = "tank";
-      # deploying the repository after the move: web is here
-      specialisation.moved.configuration.test.web = true;
+      # deploying the repository after the move: web and api are here
+      specialisation.moved.configuration.test = {
+        web = true;
+        api = true;
+      };
+    };
+
+  nodes.box =
+    { ... }:
+    {
+      services.openssh = {
+        enable = true;
+        hostKeys = [
+          {
+            path = "/etc/ssh/test_host_key";
+            type = "ed25519";
+          }
+        ];
+      };
+      environment.etc."ssh/test_host_key" = {
+        source = sshKeys.snakeOilEd25519PrivateKey;
+        mode = "0600";
+      };
+      users.users.backup = {
+        isNormalUser = true;
+        home = "/srv/backup";
+        createHome = true;
+        openssh.authorizedKeys.keys = [ sshKeys.snakeOilPublicKey ];
+      };
     };
 
   nodes.admin =
@@ -212,10 +264,10 @@ pkgs.testers.runNixOSTest {
   testScript = ''
     import json
     start_all()
-    for m in [src, dst, admin]:
+    for m in [src, dst, admin, box]:
         m.wait_for_unit("multi-user.target")
-    src.wait_for_open_port(22)
-    dst.wait_for_open_port(22)
+    for m in [src, dst, box]:
+        m.wait_for_open_port(22)
 
     src.succeed("mkfs.btrfs -f /dev/vdb")
     src.succeed("systemctl start web.service api.service $(systemd-escape --path --suffix=mount /srv/web-media)")
@@ -256,6 +308,7 @@ pkgs.testers.runNixOSTest {
         dst.succeed("zfs list tank/apps/api")
         dst.fail("zfs list tank/apps/api.incoming")
         dst.succeed("zfs destroy tank/apps/api")
+        fleetl_fails("state drop src api state")  # declared and in use
 
     with subtest("a move: service.nix edited, the state stopped, backed up, streamed, frozen"):
         out = fleetl("service move web dst --yes")
@@ -279,6 +332,23 @@ pkgs.testers.runNixOSTest {
         # api stays where it was
         src.succeed("systemctl is-active api.service")
 
+    with subtest("a move through the backup: dst restores from src's repository"):
+        src.succeed("echo api-data > /var/lib/api/marker")
+        out = fleetl("service move api dst --via backup --yes")
+        print(out)
+        assert "restored on dst from that backup" in out, out
+        admin.succeed("grep -q '\"dst\"' /repo/nixos/services/api/service.nix")
+        src.fail("touch /var/lib/api/y")
+        dst.succeed("zfs list tank/apps/api")
+        dst.succeed("mkdir -p /mnt/api && mount -t zfs tank/apps/api /mnt/api")
+        dst.succeed("grep -qx api-data /mnt/api/marker && umount /mnt/api")
+        # the credentials did not stay, nor a cache of src's repository
+        dst.fail("ls -d /run/fleet-state.??????")
+        dst.fail("grep -rqs 'PRIVATE KEY' /run /root /var/cache /tmp")
+        dst.fail("test -e /root/.cache/rustic")
+        # it came from the box, as src's last backup of it
+        box.succeed("test -d /srv/backup/state/snapshots")
+
     with subtest("deployed, the target runs the service on what it received"):
         dst.succeed("/run/current-system/specialisation/moved/bin/switch-to-configuration test")
         dst.succeed("systemctl is-active web.service")
@@ -289,16 +359,22 @@ pkgs.testers.runNixOSTest {
         # src's runs and dst's first one
         assert int(dst.succeed("wc -l < /var/lib/web/log")) == 2
         assert dst.succeed("zfs get -H -o value com.sun:auto-snapshot tank/apps/web").strip() == "true"
+        dst.succeed("systemctl is-active api.service")
+        dst.succeed("grep -qx api-data /var/lib/api/marker")
 
     with subtest("deployed, the source lets go; the frozen copy is dropped"):
+        # still declared, but frozen: dropped before the deploy, its mount blocked
+        fleetl("state drop src api state")
+        src.fail("mountpoint -q /var/lib/api")
+        src.fail("systemctl start var-lib-api.mount")
         src.succeed("/run/current-system/specialisation/moved/bin/switch-to-configuration test")
         src.fail("mountpoint -q /var/lib/web")
-        fleetl_fails("state drop src api state")  # still declared there
         fleetl("state drop src web state")
         fleetl("state drop src web-media data")
         src.succeed("mkdir -p /mnt/top && mount -o subvolid=5 /dev/vdb /mnt/top")
-        src.succeed("test ! -e /mnt/top/@apps/web && test ! -e /mnt/top/@data/web-media && test -e /mnt/top/@apps/api")
+        src.succeed("test ! -e /mnt/top/@apps/web && test ! -e /mnt/top/@data/web-media && test ! -e /mnt/top/@apps/api")
         src.succeed("umount /mnt/top")
         src.fail("ls /run/systemd/system/web.service.d/*")
+        src.fail("ls /run/systemd/system/api.service.d/*")
   '';
 }
