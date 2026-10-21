@@ -174,8 +174,17 @@ services, hosts their services and users, the stores all three).
 - `host-keys`: SSH host key and initrd key (`ssh.pub`, `initrd.pub`; private
   halves in `identity.yaml`). On every host by default.
 - `age-key`: a dedicated age key (`sops.age`; key in `identity.yaml`).
+- `fleet-ca` (scope fleet): an ECDSA P-256 CA, ten years
+  (`nixos/fleet-ca.pub`; key in `nixos/identity.yaml`, admins only).
+- `host-tls`: an ECDSA P-256 certificate for `DNS:<host>` and what the
+  host's `tls.names` and `tls.addresses` list (as DNS and IP names), server
+  and client use, five years, signed by `fleet-ca` (its inputs: the CA's
+  certificate and key, made first if missing): `tls.pub` next to
+  `host.nix`, the key in the host's store as `host-tls/tls.key`.
 - Shape of any generator: `{ pkgs }: { description; scope; inputs;
   runtimeInputs; files; script; }`, where `files.<f> = { secret; store; }`.
+  The program is run with `HOST` (the host's name, `fleet` for the fleet)
+  and `HOST_JSON` (a file with `fleet.hosts.<h>`, `{}` for the fleet).
   `scope` is `host` (per host, listed in `host.nix`, files next to it and in
   its stores) or `fleet` (once, files in `nixos/` and in `nixos/secrets.yaml`
   or `nixos/identity.yaml`; `nixos/<name>.pub` is `fleet.keys.<name>`).
@@ -261,7 +270,11 @@ arguments; stores need `root`.
 - `fleetl.sh` (admin's machine, inside the repository): reads the flake's
   `fleet` output (`nix eval --json .#fleet.*`); `secrets sync` renders
   `.sops.yaml` from `fleet.sops` (SSH host keys through ssh-to-age) and
-  re-keys the stores whose recipients, which sops keeps in the clear, differ from their rule (`sops updatekeys`, needs the admin's key); `host
+  re-keys the stores whose recipients, which sops keeps in the clear, differ from their rule (`sops updatekeys`, needs the admin's key);
+  `secrets move` decrypts each key from every source (all must hold the
+  same value, and the target must not have it), writes them to the target
+  (`sops set`, or one `sops --encrypt` for a new store), decrypts them back
+  to compare, and only then `sops unset`s them in the sources; `host
   generate` runs `packages.<sys>.generate-<g>` into a temporary directory,
   places public files, re-renders `.sops.yaml`, and writes secrets into the
   stores (a new store in one `sops --encrypt`; an existing one with `sops set`,

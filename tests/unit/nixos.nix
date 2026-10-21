@@ -168,7 +168,9 @@ check "unit-nixos" (
           "age-key"
           "ca"
           "cert"
+          "fleet-ca"
           "host-keys"
+          "host-tls"
           "token"
         ];
         token = {
@@ -183,7 +185,9 @@ check "unit-nixos" (
           age-key = "host";
           ca = "fleet";
           cert = "host";
+          fleet-ca = "fleet";
           host-keys = "host";
+          host-tls = "host";
           token = "host";
         };
         certInputs = [
@@ -254,10 +258,18 @@ check "unit-nixos" (
         out = n.keys;
         arg = (cfg "alpha")._module.args.fleet.keys or n.fleet.keys;
       };
-      expected = {
-        out.example = "example-public-value";
-        arg.example = "example-public-value";
-      };
+      expected =
+        let
+          keys = {
+            example = "example-public-value";
+            # a PEM file is kept whole, not cut to its first line
+            pem = "-----BEGIN CERTIFICATE-----\nMIIBfixture\n-----END CERTIFICATE-----\n";
+          };
+        in
+        {
+          out = keys;
+          arg = keys;
+        };
     };
 
     # service.nix is metadata: hosts (or roles), layers, free-form data

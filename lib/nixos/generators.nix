@@ -32,6 +32,8 @@ let
   generatorFiles = {
     host-keys = ../generators/host-keys.nix;
     age-key = ../generators/age-key.nix;
+    fleet-ca = ../generators/fleet-ca.nix;
+    host-tls = ../generators/host-tls.nix;
   }
   // loader.loadTreeIfExists { dir = dir "generators"; };
 
@@ -99,12 +101,10 @@ rec {
       lib.concatMapAttrs (
         n: t:
         let
-          lines = lib.filter (l: l != "" && !lib.hasPrefix "#" l) (
-            map lib.trim (lib.splitString "\n" (builtins.readFile (dir n)))
-          );
+          value = if t == "regular" && lib.hasSuffix ".pub" n then ctx.readKey (dir n) else null;
         in
-        lib.optionalAttrs (t == "regular" && lib.hasSuffix ".pub" n && lines != [ ]) {
-          ${lib.removeSuffix ".pub" n} = builtins.head lines;
+        lib.optionalAttrs (value != null) {
+          ${lib.removeSuffix ".pub" n} = value;
         }
       ) (builtins.readDir src);
 
@@ -127,7 +127,12 @@ rec {
           out="''${1:?usage: generate-${name} <out> [<in>]}"
           in="''${2:-}"
           HOST="''${HOST:-host}"
-          export HOST out in
+          # the host's metadata as JSON (fleetl passes fleet.hosts.<h>)
+          if [ -z "''${HOST_JSON:-}" ]; then
+            HOST_JSON="$(mktemp)"
+            echo '{}' >"$HOST_JSON"
+          fi
+          export HOST HOST_JSON out in
           mkdir -p "$out"
           ${g.script}
         '';

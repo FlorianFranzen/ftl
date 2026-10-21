@@ -112,7 +112,11 @@ each library function and module reads, provides and does.
   `secrets.yaml` as `<generator>/<file>` or, with `store = "identity"`, into
   `identity.yaml`. `host.nix` lists the generators a host uses (`generators`;
   `host-keys`, the SSH host and initrd keys, by default; `age-key` for a
-  dedicated age key). A generator with `scope = "fleet"` runs once for the
+  dedicated age key; `host-tls` for a TLS certificate for the host's name
+  and what `tls.names` and `tls.addresses` in its `host.nix` list,
+  good as server and client, signed by `fleet-ca`, the fleet's own CA,
+  which is made once for the fleet: `nixos/fleet-ca.pub` for everyone,
+  its key in `nixos/identity.yaml` for the admins). A generator with `scope = "fleet"` runs once for the
   whole fleet instead: its files land in `nixos/` (every `nixos/<name>.pub`
   is `fleet.keys.<name>`) and in the fleet's stores. `inputs` are files of
   other generators it reads, as `<generator>/<file>` under `$in`: a
@@ -140,6 +144,11 @@ each library function and module reads, provides and does.
   fleetl secrets sync [--check]   .sops.yaml from the layout; re-key the stores
                                   whose recipients are not the rules' (--rekey: all)
   fleetl secrets edit <store>     sops on a store
+  fleetl secrets move --to <store> --from <store>... <key>...
+                                  keys into another store (a service's, say),
+                                  only if every source holds the same value;
+                                  written there and checked, then removed from
+                                  the sources (needs the admin's key)
   fleetl host init <name>         a host folder, its generators run (--age-key:
                                   a dedicated age key too)
   fleetl host generate <name>     the host's generators whose files are missing
@@ -153,6 +162,7 @@ each library function and module reads, provides and does.
                      [--without-data] [--no-backup] [--yes]
                                   the service and its state to another host
   fleetl state list | snapshots <host> [<entry>]
+  fleetl state init <host>        create the host's backup repositories, once
   fleetl state size | stop | start <host> <entry>...
   fleetl state backup <host> --all|<entry>...
   fleetl state restore <host> <entry> [--snapshot <id>] [--from-host <h>] [--no-start]
