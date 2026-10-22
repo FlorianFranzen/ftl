@@ -7,12 +7,11 @@ deploy, and how to review the backup, restore and move work.
 State as of 2026-10-22. `git log --oneline @{u}..` in each repository shows
 what is not pushed; check it before relying on anything below.
 
-> **Do not deploy infra before its host stores are re-keyed.** infra's
-> `main` makes every host decrypt its secrets with its SSH host key only,
-> but the four host stores are still encrypted to the old age keys
-> (`nix run .#fleetl -- secrets sync --check` lists them). A deploy before
-> the re-keying leaves the host without its secrets. See step 1 of the
-> remaining steps.
+infra's host stores are re-keyed for the hosts' SSH host keys (infra
+`5607cec`, pushed); `nix run .#fleetl -- secrets sync --check` in infra
+reports every store matching its rule. Run it again before any deploy: a
+host whose store does not list its SSH host key cannot decrypt its
+secrets, since infra's configuration no longer uses the old age keys.
 
 ## The three repositories
 
@@ -23,19 +22,22 @@ what is not pushed; check it before relying on anything below.
 | nixrc | `/etc/nixos` | `master` | The workstations built with ftl. |
 
 The backup, restore and move work in ftl, and infra's adoption of it, was
-pushed on 2026-10-22, up to ftl `198b0f3` and infra `8e5eedf`. nixrc's lock
-bumps were not pushed then. The decoupling of the mounts
-(`docs/state-mounts.md`) came after that push, with a lock bump in infra
-and nixrc each.
+pushed on 2026-10-22, up to ftl `198b0f3` and infra `8e5eedf`; infra's
+re-keying (`5607cec`) followed. Not pushed as of this writing:
+- ftl: the decoupling of the mounts (`f5a0df5`, `docs/state-mounts.md`)
+  and this file's last update;
+- infra: the matching lock bump (`0bc2506`);
+- nixrc: four lock bumps, the last of them to `f5a0df5`.
 
 Both consumers lock ftl by revision (`jq -r .nodes.ftl.locked.rev
 flake.lock`), so **ftl must always be pushed before them**. Otherwise
 nothing that reads those locks can fetch ftl (comin, a fresh clone, CI).
 
 Commits were made unsigned, meant to be signed when pushed. The commits
-pushed on 2026-10-22 carry no signature (`git log --format='%h %G?'` shows
-`N`). If signing on push meant `git push --signed`, that leaves nothing on
-the commits; if it meant signed commits, they still need it.
+pushed so far carry no signature (`git log --format='%h %G?'` shows `N`).
+If signing on push meant `git push --signed`, that leaves nothing on the
+commits; if it meant signed commits, that is still to decide, for what is
+pushed and for what is not.
 
 ftl and infra use a `scope: sentence` subject and a prose body. nixrc uses
 short imperative subjects without a body.
@@ -201,27 +203,29 @@ anything that matters, run these once.
 
 In order:
 
-1. **Re-key infra's host stores.** This blocks every infra deploy (see the
-   warning at the top). The check reports four host stores whose recipients
-   differ from their rules:
+1. **Push ftl first, then infra and nixrc.** The consumers' locks name
+   ftl's last commit, which must be fetchable before they are. Decide on
+   signatures first (see above).
+2. **Check that every store still matches its rule** (it did when this was
+   written):
 
    ```
    cd ~/Denkmuskel/infra
-   nix run .#fleetl -- secrets sync          # needs the OpenPGP card
    nix run .#fleetl -- secrets sync --check  # must report nothing
    ```
 
-   Commit the re-keyed `nixos/hosts/*/secrets.yaml` files.
-2. **Push ftl, then infra and nixrc**, signing as intended (see above).
+   If it reports a store, `nix run .#fleetl -- secrets sync` (needs the
+   OpenPGP card) and commit the re-keyed files before deploying.
 3. **Check what holds the mounts, on each host, right before its deploy.**
    The decoupling of the mounts rewrites every mount unit once, so this
    one deploy unmounts every state entry on the host; anything holding one
    (a shell's working directory, a script, a backup walk) fails the deploy,
-   which then rolls back. `docs/state-mounts.md` has the checks:
+   which then rolls back. This is what failed darwin's deploy on
+   2026-10-22. `docs/state-mounts.md` has the checks:
 
    ```
    tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} #{pane_current_path}' | grep -e /srv -e /var/lib
-   sudo fuser -vm /srv/media     # and each entry's path
+   sudo fuser -vm /srv/media     # and each entry's path (fleet-state list)
    ```
 
    After this deploy a mount unit changes only when its storage does.
@@ -230,26 +234,41 @@ In order:
    - The backup units are renamed from `infra-backup` to `fleet-backup`, the
      metrics from `infra_backup_*` to `fleet_backup_*`, and the alert rules
      follow. The old `infra-backup.prom` is removed on switch.
-   - The first `fleet-backup` runs within a day, inside the 30 h of
-     `BackupMissing`.
    - While an entry is stopped or frozen, a deploy reports its units as
      failed; that is by design (see the README).
-5. **On each host, once it decrypts with its SSH host key:** remove the old
-   age key, `sudo rm /var/lib/sops-nix/key.txt`. This step is left over
-   from the move to SSH host keys.
-6. **Clean up what the old backup module left.**
+5. **Watch the first backup.** It runs within a day of the deploy, inside
+   the 30 h of `BackupMissing`. On each host: `systemctl status
+   fleet-backup`, `sudo fleet-state snapshots` (the new snapshots carry
+   `fleet-entry:`, `fleet-service:` and `fleet-root:` tags), and
+   `/var/lib/prometheus-node-exporter-text-files/fleet-backup.prom`. The
+   alerts `BackupOverdue` and `BackupMissing` stay quiet.
+6. **Remove the old age key on each host**, once it runs the new
+   configuration and its secrets are in place (`ls /run/secrets`):
+   `sudo rm /var/lib/sops-nix/key.txt`. Nothing reads it any more.
+7. **Clean up what the old backup module left.**
    - amphi, baro (btrfs): an empty `@infra-backup` directory at the top
      level of the filesystem, and any subvolume a killed run left in it.
      Mount with `subvolid=5` to see it.
    - darwin, turing (ZFS): any `<dataset>@infra-backup` snapshots
      (`zfs list -t snapshot | grep infra-backup`).
-7. **Run the drills above.**
+8. **Run the drills above**: a backup, a restore with rollback on a cheap
+   entry, and a move of a throwaway service, streamed and `--via backup`.
 
 Optional, not started:
-- `fleetl` has no `state init`; repositories are created with
-  `sudo fleet-state init` or `sudo systemctl start fleet-backup-init`.
-- Real fleet-scoped generators in infra (a CA, a shared PSK); the mechanism
-  exists, nothing uses it yet.
+- **`fleetl state init <host>`.** The backup repositories are created on
+  the host (`sudo fleet-state init` or `sudo systemctl start
+  fleet-backup-init`); fleetl has no command for it. infra does not need
+  it: its repositories already exist on the Storage Box. It matters for
+  the next new host, where it saves a login.
+- **Fleet-wide generators in infra.** ftl can generate files once for the
+  whole fleet (`scope = "fleet"`, into `nixos/` and the shared store
+  `nixos/secrets.yaml`), and generators can read each other's files. infra
+  uses neither yet: no secret is shared by every host. Candidates are an
+  internal CA (TLS between the hosts, certificates per host signed by it)
+  and a WireGuard preshared key for the mesh. The monitor pair's
+  duplicated secrets on amphi and baro (`deadman`, `dkim`, `grafana`,
+  `ntfy`) are a different case: they belong to the monitor service's own
+  store, `nixos/services/monitor/secrets.yaml`, not the fleet's.
 
 ## Reviewing the code
 
