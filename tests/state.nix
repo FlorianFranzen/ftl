@@ -83,7 +83,14 @@ pkgs.testers.runNixOSTest {
     else:
         machine.succeed("mkfs.btrfs -f /dev/vdb")
 
-    with subtest("starting the unit creates and mounts its storage"):
+    with subtest("the setup creates the storage, and starting the unit mounts it"):
+        # a mount does not pull the setup in (its text names nothing but the
+        # storage, so that a deploy only unmounts when the storage changed)
+        machine.fail("systemctl cat var-lib-counter.mount | grep -q fleet-state")
+        machine.fail("systemctl show -P Requires,Wants var-lib-counter.mount | grep -q fleet-state")
+        # the ordering is the service's (Before=), which systemd mirrors as After=
+        assert "fleet-state.service" in machine.succeed("systemctl show -P After var-lib-counter.mount")
+        machine.succeed("systemctl restart fleet-state.service")
         machine.succeed("systemctl start counter.service")
         machine.succeed("mountpoint -q /var/lib/counter")
         if zfs:
@@ -115,8 +122,10 @@ pkgs.testers.runNixOSTest {
             assert prop("quota", "tank/data") == "128M"
             assert prop("canmount", "tank/data") == "off"
 
-    with subtest("creating them again is a no-op"):
+    with subtest("creating them again is a no-op, and leaves the mounts alone"):
         machine.succeed("systemctl restart fleet-state.service")
+        machine.succeed("mountpoint -q /var/lib/counter")
+        machine.succeed("systemctl is-active counter.service")
         machine.succeed("systemctl start var-lib-private-hidden.mount")
         machine.succeed("mountpoint -q /var/lib/private/hidden")
 

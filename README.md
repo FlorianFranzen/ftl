@@ -247,7 +247,11 @@ Three things live under `nixos/` besides hosts, and they are easy to mix up:
   host keeps: each entry is a btrfs subvolume (`@apps/<name>`, `@data/<name>` on
   `fleet.storage.btrfsDevice`) or ZFS dataset (`<pool>/apps/<name>`, on
   `fleet.storage.zfsPool`), created on demand and mounted at `path` by a mount
-  unit its `units` wait for, so the root filesystem stays disposable. `kind =
+  unit its `units` wait for, so the root filesystem stays disposable. The
+  mount units name nothing but the storage (the setup service is ordered
+  before them, but none depends on it), so a deploy only unmounts an entry
+  when its storage changed, and restarting the setup unmounts nothing (see
+  `docs/state-mounts.md` for why). `kind =
   "state"` is small and precious (snapshotted, backed up by default), `"data"`
   bulk and re-obtainable. An entry declared by a service module with `service =
   service.name` moves with the service: its declaration, and its contents

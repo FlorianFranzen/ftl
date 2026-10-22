@@ -2,32 +2,47 @@
 
 This is for whoever takes over ftl and the fleets built on it. It covers
 how to test the software, what is left to do before and after the next
-deploy, and how to review the code that has not been pushed yet.
+deploy, and how to review the backup, restore and move work.
 
-State as of 2026-10-22. Check `git status -sb` in each repository before
-relying on anything below.
+State as of 2026-10-22. `git log --oneline @{u}..` in each repository shows
+what is not pushed; check it before relying on anything below.
+
+> **Do not deploy infra before its host stores are re-keyed.** infra's
+> `main` makes every host decrypt its secrets with its SSH host key only,
+> but the four host stores are still encrypted to the old age keys
+> (`nix run .#fleetl -- secrets sync --check` lists them). A deploy before
+> the re-keying leaves the host without its secrets. See step 1 of the
+> remaining steps.
 
 ## The three repositories
 
-| Repository | Path | Branch | Unpushed | What it is |
-|---|---|---|---|---|
-| ftl | `~/Nix/ftl` | `main` | 15 commits (the 13 below, this file, and the fixes of the last review) | The library: `ftl.lib.mkFlake`, the NixOS modules, `fleetl`, `fleet-state`, the test suites. |
-| infra | `~/Denkmuskel/infra` | `main` | 56 commits | The server fleet (amphi, baro, darwin, turing) built with ftl. |
-| nixrc | `/etc/nixos` | `master` | 2 commits | The workstations built with ftl. |
+| Repository | Path | Branch | What it is |
+|---|---|---|---|
+| ftl | `~/Nix/ftl` | `main` | The library: `ftl.lib.mkFlake`, the NixOS modules, `fleetl`, `fleet-state`, the test suites. |
+| infra | `~/Denkmuskel/infra` | `main` | The server fleet (amphi, baro, darwin, turing) built with ftl. |
+| nixrc | `/etc/nixos` | `master` | The workstations built with ftl. |
 
-Both consumers lock ftl at a commit that exists only in the local ftl
-checkout (`jq -r .nodes.ftl.locked.rev flake.lock` names it), so **ftl
-must be pushed before infra or nixrc**. Otherwise
-nothing that reads those locks can fetch ftl (comin on the hosts, a fresh
-clone, CI).
+The backup, restore and move work in ftl, and infra's adoption of it, was
+pushed on 2026-10-22, up to ftl `198b0f3` and infra `8e5eedf`. nixrc's lock
+bumps were not pushed then. The decoupling of the mounts
+(`docs/state-mounts.md`) came after that push, with a lock bump in infra
+and nixrc each.
 
-Commits are made unsigned and signed when pushed. ftl and infra use a
-`scope: sentence` subject and a prose body. nixrc uses short imperative
-subjects without a body.
+Both consumers lock ftl by revision (`jq -r .nodes.ftl.locked.rev
+flake.lock`), so **ftl must always be pushed before them**. Otherwise
+nothing that reads those locks can fetch ftl (comin, a fresh clone, CI).
 
-## What the unpushed ftl work does
+Commits were made unsigned, meant to be signed when pushed. The commits
+pushed on 2026-10-22 carry no signature (`git log --format='%h %G?'` shows
+`N`). If signing on push meant `git push --signed`, that leaves nothing on
+the commits; if it meant signed commits, they still need it.
 
-The 13 commits, oldest first:
+ftl and infra use a `scope: sentence` subject and a prose body. nixrc uses
+short imperative subjects without a body.
+
+## What the ftl work does
+
+The commits, oldest first (`git log --oneline 59d0958^..` in ftl):
 
 | Commit | Subject | In short |
 |---|---|---|
@@ -43,14 +58,18 @@ The 13 commits, oldest first:
 | `acdb4d4` | fleetl: service move --via backup | The target restores from the source's repository. |
 | `0908bd6` | state: what the reviews … found | The largest fix round. |
 | `487cea7` | state: per-entry scopes for stop and start | Fix round. |
-| `5c7d10e` | state: blocked templates hold their instances | Last fix round. |
+| `5c7d10e` | state: blocked templates hold their instances | Fix round. |
+| `08428ae` | docs: HUMAN.md | This file. |
+| `198b0f3` | state: what the review on Fable found | Fixes of the last review: `drop` only takes frozen copies, freezes survive reboots, undo prints what it could not do. |
+| (next) | state: mount units name nothing but the storage | The fix in `docs/state-mounts.md`. |
 
 The user-facing description is in `README.md`, under **State**, **Backups**
 and **Moving a service**, and in the `fleetl` command list. The map of the
 code is in `docs/architecture.md`, under `modules/` and `scripts/`.
 
-In infra, `99c1d01` moves the Storage Box backups onto ftl's `fleet.backup`
-and bumps the ftl lock. In nixrc, `39e1fcd` only bumps the lock.
+In infra, `99c1d01` moves the Storage Box backups onto ftl's `fleet.backup`;
+the later infra and nixrc commits named `flake: …ftl…` only bump the lock
+(infra's last one also runs the setup service in its backup test).
 
 ## Testing
 
@@ -182,10 +201,9 @@ anything that matters, run these once.
 
 In order:
 
-1. **Review the unpushed ftl work.** See the next section.
-2. **Push ftl** to `main`, signing on push.
-3. **Re-key infra's host stores.** This is still outstanding. The check
-   reports four host stores whose recipients differ from their rules:
+1. **Re-key infra's host stores.** This blocks every infra deploy (see the
+   warning at the top). The check reports four host stores whose recipients
+   differ from their rules:
 
    ```
    cd ~/Denkmuskel/infra
@@ -194,24 +212,38 @@ In order:
    ```
 
    Commit the re-keyed `nixos/hosts/*/secrets.yaml` files.
-4. **Push infra and nixrc.**
-5. **Deploy infra.**
+2. **Push ftl, then infra and nixrc**, signing as intended (see above).
+3. **Check what holds the mounts, on each host, right before its deploy.**
+   The decoupling of the mounts rewrites every mount unit once, so this
+   one deploy unmounts every state entry on the host; anything holding one
+   (a shell's working directory, a script, a backup walk) fails the deploy,
+   which then rolls back. `docs/state-mounts.md` has the checks:
+
+   ```
+   tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} #{pane_current_path}' | grep -e /srv -e /var/lib
+   sudo fuser -vm /srv/media     # and each entry's path
+   ```
+
+   After this deploy a mount unit changes only when its storage does.
+4. **Deploy infra.**
    - Avoid 00:00–01:00, the backup window.
    - The backup units are renamed from `infra-backup` to `fleet-backup`, the
      metrics from `infra_backup_*` to `fleet_backup_*`, and the alert rules
      follow. The old `infra-backup.prom` is removed on switch.
    - The first `fleet-backup` runs within a day, inside the 30 h of
      `BackupMissing`.
-6. **On each host, once it decrypts with its SSH host key:** remove the old
+   - While an entry is stopped or frozen, a deploy reports its units as
+     failed; that is by design (see the README).
+5. **On each host, once it decrypts with its SSH host key:** remove the old
    age key, `sudo rm /var/lib/sops-nix/key.txt`. This step is left over
    from the move to SSH host keys.
-7. **Clean up what the old backup module left.**
+6. **Clean up what the old backup module left.**
    - amphi, baro (btrfs): an empty `@infra-backup` directory at the top
      level of the filesystem, and any subvolume a killed run left in it.
      Mount with `subvolid=5` to see it.
    - darwin, turing (ZFS): any `<dataset>@infra-backup` snapshots
      (`zfs list -t snapshot | grep infra-backup`).
-8. **Run the drills above.**
+7. **Run the drills above.**
 
 Optional, not started:
 - `fleetl` has no `state init`; repositories are created with
@@ -329,6 +361,9 @@ These are accepted for now, but worth a second opinion:
 - **Old backups' top directory.** Backups made before the `fleet-root` tag
   (all of infra's so far) restore with the top directory's owner and mode
   as they are on the host at the time.
+- **Setup and mounts.** A mount started by hand no longer pulls in
+  `fleet-state.service`; where that service failed (at boot), an entry's
+  mount fails alone until it is started again (`docs/state-mounts.md`).
 - **Agent forwarding.** `fleetl state` and `fleetl service move` run `sudo`
   through pam_rssh with the agent forwarded. Root on that host can use the
   agent meanwhile; `ssh-add -c` makes each use ask.

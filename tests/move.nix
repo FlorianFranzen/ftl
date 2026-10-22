@@ -273,6 +273,8 @@ pkgs.testers.runNixOSTest {
         m.wait_for_open_port(22)
 
     src.succeed("mkfs.btrfs -f /dev/vdb")
+    # the storage is there now: what the setup does at boot
+    src.succeed("systemctl restart fleet-state.service")
     src.succeed("systemctl start web.service api.service $(systemd-escape --path --suffix=mount /srv/web-media)")
     src.succeed("head -c 1M /dev/urandom > /var/lib/web/blob && chown web:web /var/lib/web/blob")
     src.succeed("setfattr -n user.tag -v moved /var/lib/web/blob")

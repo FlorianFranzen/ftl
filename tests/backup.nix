@@ -130,6 +130,8 @@ pkgs.testers.runNixOSTest {
         machine.succeed("zpool create -O mountpoint=none tank /dev/vdb")
     else:
         machine.succeed("mkfs.btrfs -f /dev/vdb")
+    # the storage is there now: what the setup does at boot
+    machine.succeed("systemctl restart fleet-state.service")
     machine.succeed("systemctl start $(systemd-escape --path --suffix=mount /srv/mail-spool)")
     machine.succeed("systemctl start mail.service srv-library.mount outer.service dep.service outer.timer var-lib-outer-media.mount")
     machine.succeed("head -c 1M /dev/urandom > /var/lib/mail/inbox && chown mail:mail /var/lib/mail/inbox")
@@ -320,7 +322,9 @@ pkgs.testers.runNixOSTest {
     with subtest("freeze --stopped refuses what ran again since the stop"):
         machine.succeed("fleet-state stop echo && fleet-state start echo")
         machine.fail("fleet-state freeze --stopped echo")
+        machine.succeed("systemctl start var-lib-echo.mount && mountpoint -q /var/lib/echo")
         machine.succeed("fleet-state stop echo && fleet-state freeze --stopped echo")
+        machine.succeed("mountpoint -q /var/lib/echo")
         machine.fail("touch /var/lib/echo/frozen")
         machine.succeed("fleet-state thaw echo")
         machine.succeed("systemctl is-active echo.socket")

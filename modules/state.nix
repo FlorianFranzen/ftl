@@ -19,7 +19,10 @@
 #          operating on all state (snapshots, replication, a reservation) sweeps
 #          up terabytes of it.  Lives in <pool>/data or @data.
 #
-# Each entry is created on demand and mounted at `path`; moving it to another
+# Each entry is created by fleet-state.service (at boot, and again with every
+# deploy that changes the entries; it is ordered before the mounts, but no
+# mount depends on it, so restarting it never unmounts anything) and mounted
+# at `path`; moving it to another
 # host is moving its declaration (with its fleet service) and its contents.  On
 # ZFS, the two parents get the properties of fleet.storage.zfsProperties (e.g. a
 # reservation for state, a quota for data), and every dataset its own
@@ -379,6 +382,14 @@ in
             fleet-state = {
               description = "Subvolumes or datasets for state and data";
               unitConfig.DefaultDependencies = false;
+              # The ordering lives here, not in the mounts: a mount unit's
+              # text is what switch-to-configuration compares, and any change
+              # to it (this service's name, say) unmounts the entry on the
+              # next deploy, failing it if anything holds the mount (see
+              # docs/state-mounts.md).  Pulled in at boot, before the mounts;
+              # restarting it leaves them alone.
+              wantedBy = [ "local-fs.target" ];
+              before = lib.mapAttrsToList (_: entry: "${utils.escapeSystemdPath entry.path}.mount") entries;
 
               serviceConfig = {
                 Type = "oneshot";
@@ -427,12 +438,12 @@ in
       # Mount units rather than fileSystems: only wanted by local-fs.target, so a
       # broken one cannot keep the host from booting (and test VMs, which replace
       # fileSystems with their own, keep them).
+      # Only what, where, type and options: nothing that changes unless the
+      # storage does (see fleet-state above).
       systemd.mounts = lib.mapAttrsToList (
         _: entry:
         {
           where = entry.path;
-          requires = [ "fleet-state.service" ];
-          after = [ "fleet-state.service" ];
           wantedBy = [ "local-fs.target" ];
         }
         // (
