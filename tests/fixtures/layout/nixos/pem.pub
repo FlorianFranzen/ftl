@@ -1,0 +1,4 @@
+# a certificate, fleet.keys.pem: kept whole
+-----BEGIN CERTIFICATE-----
+MIIBfixture
+-----END CERTIFICATE-----

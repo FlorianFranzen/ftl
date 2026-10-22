@@ -101,12 +101,10 @@ rec {
       lib.concatMapAttrs (
         n: t:
         let
-          lines = lib.filter (l: l != "" && !lib.hasPrefix "#" l) (
-            map lib.trim (lib.splitString "\n" (builtins.readFile (dir n)))
-          );
+          value = if t == "regular" && lib.hasSuffix ".pub" n then ctx.readKey (dir n) else null;
         in
-        lib.optionalAttrs (t == "regular" && lib.hasSuffix ".pub" n && lines != [ ]) {
-          ${lib.removeSuffix ".pub" n} = builtins.head lines;
+        lib.optionalAttrs (value != null) {
+          ${lib.removeSuffix ".pub" n} = value;
         }
       ) (builtins.readDir src);
 
