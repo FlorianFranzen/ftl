@@ -284,8 +284,12 @@ arguments; stores need `root`.
   `access | receive --from-backup --snapshot <id the backup printed>`,
   `place`, `freeze --stopped`) and `secrets sync`, under a lock in the
   repository's git directory; each step's undo (`start`, `abort`, `thaw`;
-  `drop` once `place` succeeded) is recorded before the step, so a step
-  that fails halfway is undone too. It refuses when the old host would
+  `drop --force` of what it placed, once `place` succeeded) is recorded
+  before the step, with the command that does it by hand, so a step that
+  fails halfway is undone too, and what cannot be undone (a host out of
+  reach) is printed. The deploy output (`sshUser`, the nodes' hostnames)
+  is evaluated once per run, its absence meaning root and fqdn, its failure
+  an error; ssh runs with `BatchMode` and a connect timeout. It refuses when the old host would
   have no `fleet-state` after its deploy. `state copy` is `send | receive`
   and `place --replace` for one entry. Temporary directories are `0700` and
   removed on any exit.
@@ -341,9 +345,17 @@ arguments; stores need `root`.
     in if the host uses the entry already; refused if the location exists,
     unless `--replace`), `abort` removes it; `freeze` quiesces (unless a
     `stop` did) and sets the location read-only, with `--stopped` only if a
-    stop in this boot kept the entry stopped all along; `thaw` undoes it;
-    `drop` destroys the location of an entry the host no longer declares,
-    with its snapshots and blocks, never anything below it. `access`
+    stop in this boot kept the entry stopped all along, and writes
+    `/var/lib/fleet-state/frozen/<entry>`, which the state module makes
+    every unit of the entry assert absent (so the block survives reboots;
+    the activation snippet removes markers of entries no longer declared);
+    `thaw` undoes it; `drop` destroys the location of an entry the host no
+    longer declares if it is frozen (marker, or `readonly` set locally /
+    `ro` on btrfs), anything else only with `--force`, with its snapshots
+    and blocks, never anything below it. `send` fails on anything tar
+    reports but sockets, which it counts and leaves out. `size` reads ZFS's
+    `referenced`, a btrfs qgroup when quotas are on, else counts with
+    `du`. `access`
     writes a kind's repository table as JSON (with `password-file`), the
     host's name and the credential files as a tar; `receive --from-backup`
     unpacks that into a `0700` directory below the scratch space, refuses

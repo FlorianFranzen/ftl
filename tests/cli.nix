@@ -86,8 +86,9 @@ let
             cat
           fi ;;
       "eval --json .#fleet."*) cat "${fleetJson}/''${3#.#fleet.}.json" ;;
-      "eval --raw .#deploy.sshUser") printf admin ;;
-      "eval --raw .#deploy.nodes.\"alpha\".hostname") printf 10.0.0.1 ;;
+      "eval --json .#deploy --apply "*)
+        if [ -n "''${DEPLOY_BROKEN:-}" ]; then echo "error: deploy-rs: boom" >&2; exit 1; fi
+        echo '{ "user": "admin", "hosts": { "alpha": "10.0.0.1" } }' ;;
       "run .#generate-"*) name="''${2#.#}"; shift 3; exec ${programs}/bin/"$name" "$@" ;;
       *) echo "stub nix: no $*" >&2; exit 1 ;;
     esac
@@ -133,7 +134,7 @@ pkgs.runCommand "cli"
     got="$(fleetl host exec alpha -- uptime -p)"
     echo "$got"
     case "$got" in
-      "ssh -o HostKeyAlias=alpha -o UserKnownHostsFile="*"/known_hosts.alpha -o StrictHostKeyChecking=yes admin@10.0.0.1 -- uptime -p") ;;
+      "ssh -o BatchMode=yes -o ConnectTimeout=15 -o HostKeyAlias=alpha -o UserKnownHostsFile="*"/known_hosts.alpha -o StrictHostKeyChecking=yes admin@10.0.0.1 -- uptime -p") ;;
       *) echo "host exec alpha: unexpected command"; exit 1 ;;
     esac
     known="$(echo "$got" | sed 's/.*UserKnownHostsFile=\([^ ]*\).*/\1/')"
@@ -149,9 +150,11 @@ pkgs.runCommand "cli"
         )
       )
     } ] || { echo "host exec all: wrong host count"; exit 1; }
-    echo "$got" | grep -q '^ssh root@beta -- true$' || { echo "beta should not be pinned"; exit 1; }
+    echo "$got" | grep -q '^ssh -o BatchMode=yes -o ConnectTimeout=15 root@beta -- true$' || { echo "beta should not be pinned"; exit 1; }
 
     ! fleetl host exec nosuch -- true 2>/dev/null || { echo "unknown host accepted"; exit 1; }
+    # a deploy output that fails to evaluate is an error, not root@<fqdn>
+    ! DEPLOY_BROKEN=1 fleetl host exec alpha -- true 2>/dev/null || { echo "a broken deploy output fell back"; exit 1; }
     ! fleetl host exec alpha 2>/dev/null || { echo "missing command accepted"; exit 1; }
 
     # --- state ---------------------------------------------------------------
@@ -160,12 +163,12 @@ pkgs.runCommand "cli"
     got="$(fleetl state restore alpha mail --snapshot 'a b')"
     echo "$got"
     case "$got" in
-      "ssh -A -o HostKeyAlias=alpha "*" admin@10.0.0.1 -- sudo fleet-state restore mail --snapshot a\\ b ") ;;
+      "ssh -A -o BatchMode=yes -o ConnectTimeout=15 -o HostKeyAlias=alpha "*" admin@10.0.0.1 -- sudo fleet-state restore mail --snapshot a\\ b ") ;;
       *) echo "state restore: unexpected command"; exit 1 ;;
     esac
     got="$(fleetl state list beta)"
     echo "$got"
-    [ "$got" = "ssh -A admin@beta -- sudo fleet-state list " ] || { echo "state list: unexpected command"; exit 1; }
+    [ "$got" = "ssh -A -o BatchMode=yes -o ConnectTimeout=15 admin@beta -- sudo fleet-state list " ] || { echo "state list: unexpected command"; exit 1; }
     ! fleetl state restore alpha 2>/dev/null || { echo "restore without entry accepted"; exit 1; }
     ! fleetl state list nosuch 2>/dev/null || { echo "unknown host accepted"; exit 1; }
 

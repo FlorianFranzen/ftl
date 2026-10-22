@@ -308,22 +308,34 @@ Three things live under `nixos/` besides hosts, and they are easy to mix up:
   blocked), the ones backed up get a last backup, each entry is streamed
   from a snapshot into `<location>.incoming` on the target (through the
   admin's machine, as a tar with numeric owners, ACLs and xattrs; the
-  target's datasets have POSIX ACLs and SA xattrs, and anything tar cannot
-  set fails the move) and placed only once both ends finished, and the old
-  copies are frozen: read-only and blocked, and only if they stayed stopped
-  since (no reboot, no start meanwhile). Last, `secrets sync` re-keys the
-  service's store for the target. Until then every step is undone on a
-  failure, a step that failed halfway included: `service.nix` back, what
-  reached the target dropped (never what was there before), the old copies
-  thawed and started again. The service is down from the stop until the
+  target's datasets have POSIX ACLs and SA xattrs; anything tar cannot read
+  or set fails the move, except sockets, which are not carried and are made
+  anew by whoever listens) and placed only once both ends finished, and
+  the old copies are frozen: read-only and blocked, and only if they stayed
+  stopped since (no reboot, no start meanwhile). A frozen copy stays
+  blocked across reboots: every entry's units assert the absence of
+  `/var/lib/fleet-state/frozen/<entry>`, which freeze writes and a deploy
+  without the entry removes. Last, `secrets sync` re-keys the service's
+  store for the target. Until then every step is undone on a failure, a
+  step that failed halfway included, as far as the hosts can be reached:
+  `service.nix` back, what this move placed on the target dropped (never
+  what was there before), the old copies thawed and started again. What
+  could not be undone is printed with the commands that do it by hand. The
+  hosts are reached as the deploy output says, evaluated once, with ssh in
+  batch mode, so that a lost host fails the move rather than hanging it. The service is down from the stop until the
   target runs the new configuration; the target's datasets are there
   before its deploy, so it starts on its state, never on an empty one.
   `--from` picks the host of a service on several, `--no-backup` skips the
   last backup, `--without-data` leaves the `data` entries on the old host,
   unfrozen and out of the drop list: `fleetl state copy <from> <to> <entry>
-  data` brings one over later (swapped in on the target), before it is
-  dropped. `drop` only takes what the host no longer declares: until its
-  deploy, a reboot would make an empty one and start the service on it.
+  data` brings one over later (swapped in on the target), and `drop
+  --force` removes it once the old host is deployed. `drop` only takes the
+  frozen copy a move left on a host that no longer declares the entry;
+  anything else (a copy just placed, a mistyped host) only with `--force`.
+
+  While an entry is stopped or frozen, a deploy of that host reports its
+  units as failed: they refuse to start, by design, until `start`, `thaw`
+  or the deploy that takes the entry away.
 
   `--via backup` takes the backed-up entries through the backup instead of
   the admin's machine: the target restores exactly the snapshot the last

@@ -330,6 +330,13 @@ in
         (
           exec 8>/run/fleet-state.swap.lock
           ${pkgs.util-linux}/bin/flock 8
+          # and the freezes of entries no longer declared
+          for marker in /var/lib/fleet-state/frozen/*; do
+            [ -e "$marker" ] || continue
+            if ! ${pkgs.jq}/bin/jq -e --arg n "$(basename "$marker")" '.entries | has($n)' /etc/fleet-state/state.json >/dev/null 2>&1; then
+              rm -f "$marker"
+            fi
+          done
           for record in /run/fleet-state/*.blocked; do
             [ -e "$record" ] || continue
             name="$(basename "$record" .blocked)"
@@ -405,11 +412,14 @@ in
             );
           }
         ]
-        # Every entry's units wait for (and stop without) its mount.
+        # Every entry's units wait for (and stop without) its mount, and do
+        # not start while fleet-state has the entry frozen (the copy a move
+        # left, until the deploy that takes the entry away), reboots included.
         ++ lib.mapAttrsToList (
-          _: entry:
+          name: entry:
           lib.genAttrs entry.units (_: {
             unitConfig.RequiresMountsFor = [ entry.path ];
+            unitConfig.AssertPathExists = [ "!/var/lib/fleet-state/frozen/${name}" ];
           })
         ) entries
       );

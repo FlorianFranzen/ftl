@@ -11,12 +11,13 @@ relying on anything below.
 
 | Repository | Path | Branch | Unpushed | What it is |
 |---|---|---|---|---|
-| ftl | `~/Nix/ftl` | `main` | 14 commits (the 13 below, and this file) | The library: `ftl.lib.mkFlake`, the NixOS modules, `fleetl`, `fleet-state`, the test suites. |
+| ftl | `~/Nix/ftl` | `main` | 15 commits (the 13 below, this file, and the fixes of the last review) | The library: `ftl.lib.mkFlake`, the NixOS modules, `fleetl`, `fleet-state`, the test suites. |
 | infra | `~/Denkmuskel/infra` | `main` | 56 commits | The server fleet (amphi, baro, darwin, turing) built with ftl. |
 | nixrc | `/etc/nixos` | `master` | 2 commits | The workstations built with ftl. |
 
-Both consumers lock ftl at `5c7d10e`. That commit exists only in the local
-ftl checkout, so **ftl must be pushed before infra or nixrc**. Otherwise
+Both consumers lock ftl at a commit that exists only in the local ftl
+checkout (`jq -r .nodes.ftl.locked.rev flake.lock` names it), so **ftl
+must be pushed before infra or nixrc**. Otherwise
 nothing that reads those locks can fetch ftl (comin on the hosts, a fresh
 clone, CI).
 
@@ -152,8 +153,8 @@ worked on in parallel.
 
 ### Drills on the real hosts, after the deploy
 
-The VM tests do not touch the real Storage Box, real services or a reboot
-in the middle of an operation. Before trusting restores and moves with
+The VM tests do not touch the real Storage Box or real services, and they
+reboot only once (a source between its freeze and its deploy). Before trusting restores and moves with
 anything that matters, run these once.
 
 1. **A backup.** On any host:
@@ -173,7 +174,8 @@ anything that matters, run these once.
      hosts' reach, and give it some data.
    - `fleetl service move <svc> <host>`, commit, deploy the target, then
      the source.
-   - Check the data on the target, then `fleetl state drop <source> <entry> <kind>`.
+   - Check the data on the target, then `fleetl state drop <source> <entry> <kind>`
+     (data left behind with `--without-data` needs `--force`).
    - Repeat with `--via backup`.
 
 ## Remaining steps
@@ -270,7 +272,8 @@ that breaks one.
 - **Nothing is destroyed that fleet-state did not make or was not named.**
   `destroy_location` is reached from:
   - `discard`, which takes strict `.aside-<time>` names only;
-  - `drop`, which takes only entries the host no longer declares;
+  - `drop`, which takes only frozen copies of entries the host no longer
+    declares, or anything at the location with `--force`;
   - `abort`, which takes `.incoming` only;
   - the cleanups of `.incoming`.
   It never recurses into children.
@@ -279,7 +282,9 @@ that breaks one.
 - **What stopped is started again, and nothing else.** Each entry records
   its own scope. A unit another stopped entry still holds is handed to that
   entry's record. Blocks are `/run` drop-ins: they are lifted by `start`, by
-  a reboot, or by a deploy that no longer declares the entry.
+  a reboot, or by a deploy that no longer declares the entry. A frozen
+  entry is also blocked across reboots, by a marker in
+  `/var/lib/fleet-state/frozen` that its units assert absent.
 - **A move is undone exactly as far as it got.**
   - Each undo is recorded before its step.
   - The target's `drop` is recorded only after `place` succeeded.
@@ -295,12 +300,14 @@ that breaks one.
 
 ### What the reviews already found
 
-Six independent review passes ran on these commits and on infra's
-adoption. Every defect they reported was fixed and, where feasible, tested;
-the commit messages of `35ba05f`, `0908bd6`, `487cea7` and `5c7d10e` list
-them. The last pass found one defect affecting infra, the top directory of
-a restored pre-tag backup, and one dormant one in ftl; `5c7d10e` fixes
-both. A fresh review is most useful where the earlier ones were weakest:
+Seven independent review passes ran on these commits and on infra's
+adoption, the last on a different model (Fable) over the whole of it.
+Every defect they reported was fixed and, where feasible, tested; the
+commit messages of `35ba05f`, `0908bd6`, `487cea7`, `5c7d10e` and the
+latest one (the Fable fixes) list them. The last pass judged the work ready to
+push; what it found (`drop` taking any undeclared location, undo needing
+the host that failed, frozen copies starting again after a reboot, and
+smaller ones) is fixed in that last commit. A fresh review is most useful where the earlier ones were weakest:
 - concurrency (two runs, a deploy or reboot in the middle);
 - systemd corner cases;
 - the move's undo paths.
@@ -330,9 +337,11 @@ These are accepted for now, but worth a second opinion:
 - **Not covered by a test:**
   - a signal or a lost connection in the middle of a swap;
   - `swap_recover` itself;
-  - a reboot between a move's stop and its freeze, and before a `drop`;
-  - `--without-data` followed by `state copy`;
+  - a reboot between a move's stop and its freeze (`freeze --stopped`
+    refuses then; the reboot after the freeze is tested);
   - a failing `--via backup` (wrong key, unknown host key);
+  - an unreachable host during a move's undo (the printed recovery
+    commands);
   - the real Storage Box.
   The drills above cover the last one.
 

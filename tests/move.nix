@@ -156,6 +156,8 @@ let
         "eval --json .#nixosConfigurations.\"src\".config.fleet.backup.enable") echo true ;;
         "eval --json .#nixosConfigurations.\"src\".config.fleet.storage.tool.enable") echo true ;;
         "eval --json .#nixosConfigurations.\"dst\".config.fleet.backup.enable") echo false ;;
+        # this repository has no deploy output
+        "eval --json .#deploy --apply "*) echo "error: flake does not provide attribute 'deploy'" >&2; exit 1 ;;
         *) echo "stub nix: no $*" >&2; exit 1 ;;
       esac
     '';
@@ -313,25 +315,49 @@ pkgs.testers.runNixOSTest {
         dst.succeed("zfs destroy tank/apps/api")
         fleetl_fails("state drop src api state")  # declared and in use
 
-    with subtest("a move: service.nix edited, the state stopped, backed up, streamed, frozen"):
-        out = fleetl("service move web dst --yes")
+    def web_snapshots():
+        snaps = json.loads(src.succeed("rustic -P state snapshots --json --filter-label web"))
+        return sum(len(g["snapshots"]) for g in snaps)
+
+    with subtest("a move failing after it placed an entry drops that one again, and only that"):
+        # web-media is in the way on dst; web goes first and is placed
+        dst.succeed("zfs create -p -o mountpoint=legacy tank/data/web-media")
+        fleetl_fails("service move web dst --yes")
+        admin.succeed("grep -q '\"src\"' /repo/nixos/services/web/service.nix")
+        dst.fail("zfs list tank/apps/web")
+        dst.succeed("zfs list tank/data/web-media")  # what was there stays
+        src.succeed("systemctl is-active web.service")
+        src.succeed("touch /var/lib/web/still-writable")
+        dst.succeed("zfs destroy tank/data/web-media")
+        # its last backup was made before the failure
+        assert web_snapshots() == 1
+
+    with subtest("a move without its data and without a backup; the data copied later"):
+        runs = int(src.succeed("wc -l < /var/lib/web/log"))
+        out = fleetl("service move web dst --without-data --no-backup --yes")
         print(out)
+        assert "fleetl state copy src dst <entry> <kind>" in out, out
         admin.succeed("grep -q '\"dst\"' /repo/nixos/services/web/service.nix")
         admin.fail("grep -q '\"src\"' /repo/nixos/services/web/service.nix")
         admin.succeed("grep -q 'port = 8080' /repo/nixos/services/web/service.nix")
         admin.succeed("test -f /repo/.sops.yaml")
-        # the source: stopped, blocked, read-only
+        assert web_snapshots() == 1
+        # the source: stopped, blocked; what moved is read-only, the data is not
         src.fail("systemctl is-active web.service")
         src.fail("systemctl start web.service")
         src.fail("touch /var/lib/web/x")
-        # a last backup of what is backed up
-        snaps = json.loads(src.succeed("rustic -P state snapshots --json --filter-label web"))
-        assert sum(len(g["snapshots"]) for g in snaps) == 1, snaps
-        # the target: both entries, as the state module makes them
+        src.succeed("touch /srv/web-media/still-writable && rm /srv/web-media/still-writable")
         datasets = dst.succeed("zfs list -H -o name,mountpoint -r tank")
         assert "tank/apps/web\tlegacy" in datasets, datasets
-        assert "tank/data/web-media\tlegacy" in datasets, datasets
+        assert "web-media" not in datasets, datasets
         assert "incoming" not in datasets, datasets
+        # what was just placed on dst is no frozen copy: drop refuses it
+        fleetl_fails("state drop dst web state")
+        dst.succeed("zfs list tank/apps/web")
+        # the data, copied when it suits
+        fleetl("state copy src dst web-media data")
+        datasets = dst.succeed("zfs list -H -o name,mountpoint -r tank")
+        assert "tank/data/web-media\tlegacy" in datasets, datasets
         # api stays where it was
         src.succeed("systemctl is-active api.service")
 
@@ -356,6 +382,16 @@ pkgs.testers.runNixOSTest {
         # it came from the box, as src's last backup of it
         box.succeed("test -d /srv/backup/state/snapshots")
 
+    with subtest("a reboot of the source before its deploy does not start what moved"):
+        src.shutdown()
+        src.start()
+        src.wait_for_unit("multi-user.target")
+        src.fail("systemctl is-active web.service")
+        src.fail("systemctl start web.service")
+        src.fail("systemctl start api.service")
+        src.fail("touch /var/lib/web/x")
+        src.wait_for_open_port(22)
+
     with subtest("deployed, the target runs the service on what it received"):
         dst.succeed("/run/current-system/specialisation/moved/bin/switch-to-configuration test")
         dst.succeed("systemctl is-active web.service")
@@ -365,7 +401,7 @@ pkgs.testers.runNixOSTest {
         assert dst.succeed("getfattr --only-values -n user.tag /var/lib/web/blob").strip() == "moved"
         dst.succeed("grep -qx media /srv/web-media/film")
         # src's runs and dst's first one
-        assert int(dst.succeed("wc -l < /var/lib/web/log")) == 2
+        assert int(dst.succeed("wc -l < /var/lib/web/log")) == runs + 1
         assert dst.succeed("zfs get -H -o value com.sun:auto-snapshot tank/apps/web").strip() == "true"
         dst.succeed("systemctl is-active api.service")
         dst.succeed("grep -qx api-data /var/lib/api/marker")
@@ -376,7 +412,9 @@ pkgs.testers.runNixOSTest {
         src.succeed("/run/current-system/specialisation/moved/bin/switch-to-configuration test")
         src.fail("mountpoint -q /var/lib/web")
         fleetl("state drop src web state")
-        fleetl("state drop src web-media data")
+        # the data that stayed was never frozen: only by force
+        fleetl_fails("state drop src web-media data")
+        fleetl("state drop src --force web-media data")
         fleetl("state drop src api state")
         src.succeed("mkdir -p /mnt/top && mount -o subvolid=5 /dev/vdb /mnt/top")
         src.succeed("test ! -e /mnt/top/@apps/web && test ! -e /mnt/top/@data/web-media && test ! -e /mnt/top/@apps/api")

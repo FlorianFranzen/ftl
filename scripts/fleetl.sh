@@ -564,14 +564,38 @@ host_install() {
 hosts_json=""
 ssh_cmd=()
 ssh_user=""
+
+# The deploy output's login and addresses, evaluated once (call it before
+# any pipeline, so that its parts share it): a repository without one gets
+# root and the hosts' fqdn or name; one whose deploy output fails to
+# evaluate is an error, not a quiet fallback.
+deploy_json=""
+deploy_info() {
+  [ -z "$deploy_json" ] || return 0
+  if deploy_json="$(nix eval --json .#deploy \
+    --apply 'd: { user = d.sshUser or null; hosts = builtins.mapAttrs (_: n: n.hostname or null) (d.nodes or { }); }' \
+    2>"$tmp/deploy.err")"; then
+    return 0
+  fi
+  if grep -q 'does not provide attribute' "$tmp/deploy.err"; then
+    deploy_json='{ "user": null, "hosts": {} }'
+  else
+    cat "$tmp/deploy.err" >&2
+    die "could not evaluate the deploy output for the hosts' addresses"
+  fi
+}
+
 ssh_to() {
   local h="$1" user="${2:-}" address key
   [ -n "$hosts_json" ] || hosts_json="$(fleet_json hosts)"
   jq -e --arg h "$h" 'has($h)' <<<"$hosts_json" >/dev/null || die "no host '$h'"
-  [ -n "$user" ] || user="$(nix eval --raw .#deploy.sshUser 2>/dev/null || echo root)"
-  address="$(nix eval --raw ".#deploy.nodes.\"$h\".hostname" 2>/dev/null || jq -r --arg h "$h" '.[$h].fqdn // $h' <<<"$hosts_json")"
+  deploy_info
+  [ -n "$user" ] || user="$(jq -r '.user // "root"' <<<"$deploy_json")"
+  address="$(jq -r --arg h "$h" '.hosts[$h] // empty' <<<"$deploy_json")"
+  [ -n "$address" ] || address="$(jq -r --arg h "$h" '.[$h].fqdn // $h' <<<"$hosts_json")"
   key="$(jq -r --arg h "$h" '.[$h].keys.ssh // empty' <<<"$hosts_json")"
-  ssh_cmd=("${FLEETL_SSH:-ssh}")
+  # fail fast instead of hanging or prompting in the middle of a move
+  ssh_cmd=("${FLEETL_SSH:-ssh}" -o BatchMode=yes -o ConnectTimeout=15)
   if [ -n "$key" ]; then
     echo "$h $key" >"$tmp/known_hosts.$h"
     ssh_cmd+=(-o "HostKeyAlias=$h" -o "UserKnownHostsFile=$tmp/known_hosts.$h" -o StrictHostKeyChecking=yes)
@@ -624,7 +648,8 @@ host_exec() {
   [ $# -gt 0 ] || die "host exec: no command given"
 
   hosts_json="$(fleet_json hosts)"
-  [ -n "$user" ] || user="$(nix eval --raw .#deploy.sshUser 2>/dev/null || echo root)"
+  deploy_info
+  [ -n "$user" ] || user="$(jq -r '.user // "root"' <<<"$deploy_json")"
   local -a names
   if [ "$name" = all ]; then
     mapfile -t names < <(jq -r 'to_entries[] | select(.value.importance != "ignored") | .key' <<<"$hosts_json")
@@ -770,14 +795,17 @@ service_move() {
   exec 7>"$(git rev-parse --git-common-dir)/fleetl.lock"
   flock -n 7 || die "another fleetl is moving a service of this repository"
 
-  # Undone on any failure from here on, last done first.
+  deploy_info
+  # Undone on any failure from here on, last done first; each step with the
+  # command that does it by hand, for when a host cannot be reached.
   move_undo=()
+  move_hint=()
   move_done=0
   trap 'if [ "$move_done" = 0 ]; then service_move_undo; fi; rm -rf "$tmp"' EXIT
 
   # --- 2. service.nix
   cp "$file" "$tmp/service.nix.orig"
-  move_undo+=("cp '$tmp/service.nix.orig' '$file'")
+  undo_step "cp '$tmp/service.nix.orig' '$file'" "git -C $PWD diff -- $file   (undo the host change by hand)"
   # host names are directory names; only a dot needs escaping
   sed -i "s/\"${from//./\\.}\"/\"$to\"/g" "$file"
   local expected got
@@ -802,7 +830,7 @@ service_move() {
   if [ "${#names[@]}" -gt 0 ]; then
     # --- 3. the state.  Each undo is in place before its step: a step that
     # fails halfway is undone as well (they are all safe to repeat).
-    move_undo+=("as_root '$from' fleet-state start ${names[*]}")
+    undo_step "as_root '$from' fleet-state start ${names[*]} </dev/null" "fleetl state start $from ${names[*]}"
     as_root "$from" fleet-state stop "${names[@]}" </dev/null
     local -A snapshot=()
     if [ "${#backups[@]}" -gt 0 ]; then
@@ -816,7 +844,7 @@ service_move() {
     for name in "${moving[@]}"; do
       kind="$(jq -r --arg n "$name" '.[$n].kind' <<<"$entries")"
       # what reaches the target stays beside it until it arrived whole
-      move_undo+=("as_root '$to' fleet-state abort '$name' '$kind' </dev/null")
+      undo_step "as_root '$to' fleet-state abort '$name' '$kind' </dev/null" "fleetl state abort $to $name $kind"
       if [ "$via" = backup ] && [ -n "${snapshot[$name]:-}" ]; then
         as_root "$from" fleet-state access "$kind" </dev/null |
           as_root "$to" fleet-state receive "$name" "$kind" --from-backup "$from" --snapshot "${snapshot[$name]}"
@@ -826,10 +854,11 @@ service_move() {
       # both ends succeeded (pipefail): only now is it the entry's, and only
       # what this move placed is dropped again
       as_root "$to" fleet-state place "$name" "$kind" </dev/null
-      move_undo+=("as_root '$to' fleet-state drop '$name' '$kind' </dev/null")
+      # not frozen (it is the new copy): only by force, and only this one
+      undo_step "as_root '$to' fleet-state drop --force '$name' '$kind' </dev/null" "fleetl state drop $to --force $name $kind"
     done
     if [ "${#moving[@]}" -gt 0 ]; then
-      move_undo+=("as_root '$from' fleet-state thaw ${moving[*]} </dev/null")
+      undo_step "as_root '$from' fleet-state thaw ${moving[*]} </dev/null" "fleetl state thaw $from ${moving[*]}"
       # what was sent, and only if it stayed stopped all along
       as_root "$from" fleet-state freeze --stopped "${moving[@]}" </dev/null
     fi
@@ -857,19 +886,31 @@ EOF
     local staying
     staying="$(jq -r --arg m " ${moving[*]} " 'to_entries[] | .key as $k | select($m | contains(" " + $k + " ") | not) | "    \($k) \(.value.kind)"' <<<"$entries")"
     if [ -n "$staying" ]; then
-      echo "  these stayed on $from (--without-data); copy them when it suits, before dropping them:"
+      echo "  these stayed on $from (--without-data), not frozen; copy them when it suits, then"
+      echo "  drop them by force once $from is deployed:"
       echo "    fleetl state copy $from $to <entry> <kind>"
+      echo "    fleetl state drop $from --force <entry> <kind>"
       echo "$staying"
     fi
   fi
 }
 
+undo_step() { # <command> <what does it by hand>
+  move_undo+=("$1")
+  move_hint+=("$2")
+}
+
 service_move_undo() {
   local i
+  local -a left=()
   echo "fleetl: undoing the move" >&2
   for ((i = ${#move_undo[@]} - 1; i >= 0; i--)); do
-    eval "${move_undo[$i]}" || echo "fleetl: could not undo: ${move_undo[$i]}" >&2
+    eval "${move_undo[$i]}" || left+=("${move_hint[$i]}")
   done
+  if [ "${#left[@]}" -gt 0 ]; then
+    echo "fleetl: these could not be undone (a host out of reach?); once it is back, in this order:" >&2
+    printf '  %s\n' "${left[@]}" >&2
+  fi
 }
 
 # An entry from one host to another (what a move left behind with
@@ -879,6 +920,7 @@ state_copy() {
   in_repo
   local usage="usage: fleetl state copy <from> <to> <entry> <kind>"
   local from="${1:?$usage}" to="${2:?$usage}" name="${3:?$usage}" kind="${4:?$usage}"
+  deploy_info
   as_root "$from" fleet-state send "$name" "$kind" </dev/null | as_root "$to" fleet-state receive "$name" "$kind" || {
     as_root "$to" fleet-state abort "$name" "$kind" </dev/null || true
     die "$name: not copied"
@@ -892,6 +934,7 @@ state_cmd() {
   in_repo
   local sub="$1" h="${2:?usage: fleetl state $1 <host> ...}"
   shift 2
+  deploy_info
   case "$sub" in
     restore | rollback) [ $# -gt 0 ] || die "usage: fleetl state $sub <host> <entry> ..." ;;
     discard) [ $# = 1 ] || die "usage: fleetl state discard <host> <aside>" ;;
@@ -980,7 +1023,7 @@ case "${1:-}" in
     ;;
   state)
     case "${2:-}" in
-      list | size | stop | start | snapshots | backup | restore | rollback | discard | thaw | drop) state_cmd "${@:2}" ;;
+      list | size | stop | start | snapshots | backup | restore | rollback | discard | thaw | drop | place | abort) state_cmd "${@:2}" ;;
       copy) shift 2; state_copy "$@" ;;
       *) usage ;;
     esac

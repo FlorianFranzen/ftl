@@ -50,8 +50,10 @@
 #                                          behind cannot change any more; --stopped: only if
 #                                          a stop in this boot kept it stopped all along
 #   fleet-state thaw <entry>...            undo freeze
-#   fleet-state drop <entry> <kind>        destroy what a move left behind of an entry
-#                                          this host no longer declares
+#   fleet-state drop [--force] <entry> <kind>
+#                                          destroy the frozen copy a move left of an entry
+#                                          this host no longer declares (--force: whatever
+#                                          is at its location)
 #
 # What the host keeps is described by /etc/fleet-state/state.json (written by
 # the state module), its backups by /etc/fleet-state/backup.json and the rustic
@@ -69,6 +71,10 @@ profiles="${FLEET_STATE_PROFILES:-/etc/rustic}"
 # runtime masks)
 records=/run/fleet-state
 dropins=/run/systemd/system
+# frozen entries, across reboots: the state module makes every entry's units
+# assert the absence of <frozen>/<entry>, so that a reboot before the deploy
+# that takes the entry away does not start them on the copy left behind
+frozen=/var/lib/fleet-state/frozen
 
 usage() {
   sed -n '/^# fleet-state:/,/^$/p' "$0" | sed 's/^# \{0,1\}//'
@@ -1088,8 +1094,20 @@ cmd_send() {
   location_exists "$loc" || die "no $loc on $host"
   ! has_children "$loc" || die "$name: $loc has datasets or subvolumes below it, which would not go along"
   snapshot_take "$name" fleet-send "$loc"
-  log "$name: sending $(du -shx "$snapdir" | cut -f1)"
-  tar -C "$snapdir" -c "${tar_flags[@]}" -f - .
+  log "$name: sending"
+  # sockets are not carried (they are made anew by whoever listens); any
+  # other complaint of tar's fails the send, and with it the receive
+  if ! tar -C "$snapdir" -c "${tar_flags[@]}" -f - . 2>"$scratch/tar.err"; then
+    cat "$scratch/tar.err" >&2 || true
+    die "$name: tar failed"
+  fi
+  local sockets
+  sockets="$(grep -c 'socket ignored$' "$scratch/tar.err" || true)"
+  if [ "$sockets" -gt 0 ]; then log "$name: $sockets socket(s) not sent"; fi
+  if grep -v 'socket ignored$' "$scratch/tar.err" | grep -q .; then
+    grep -v 'socket ignored$' "$scratch/tar.err" >&2 || true
+    die "$name: tar reported problems; what was sent is incomplete"
+  fi
 }
 
 # The repository of a kind, for a restore on another host: its settings as
@@ -1340,9 +1358,11 @@ cmd_freeze() {
   if [ "${#fresh[@]}" -gt 0 ]; then
     quiesce "${fresh[@]}"
   fi
+  mkdir -p "$frozen"
   for name in "$@"; do
     set_readonly "$(field "$name" location)" on
-    log "$name: frozen ($(field "$name" location) read-only, its units blocked)"
+    date -Is >"$frozen/$name"
+    log "$name: frozen ($(field "$name" location) read-only, its units blocked, across reboots too)"
   done
 }
 
@@ -1353,17 +1373,38 @@ cmd_thaw() {
   lock
   for name in "$@"; do
     set_readonly "$(field "$name" location)" off
+    rm -f "$frozen/$name"
   done
   resume "$@"
 }
 
+# Read-only by fleet-state's freeze (not by a property someone declared).
+is_frozen() { # <entry> <location>
+  [ -f "$frozen/$1" ] && return 0
+  if [ "$backend" = zfs ]; then
+    [ "$(zfs get -H -s local -o value readonly "$2")" = on ]
+  else
+    [ "$(btrfs property get -ts "$top/$2" ro)" = ro=true ]
+  fi
+}
+
 cmd_drop() {
+  local force=0
+  if [ "${1:-}" = --force ]; then
+    force=1
+    shift
+  fi
   [ $# = 2 ] || usage
   local name="$1" kind="$2" loc m snap
   ! has_entry "$name" || die "$name is still declared on $host; drop what a move left once the host is deployed without it"
   loc="$(location_of "$name" "$kind")"
   lock
   location_exists "$loc" || die "no $loc on $host"
+  # what a move leaves is frozen; anything else (a copy just received, a
+  # mistyped host) only by force
+  if [ "$force" = 0 ] && ! is_frozen "$name" "$loc"; then
+    die "$loc on $host is not a frozen copy a move left; not destroying it (--force if you mean it)"
+  fi
   # unmounted wherever it is still mounted
   if [ "$backend" = zfs ]; then
     while IFS= read -r m; do
@@ -1387,7 +1428,7 @@ cmd_drop() {
     done <"$records/$name.stopped"
   fi
   unblock "$name"
-  rm -f "$records/$name.stopped"
+  rm -f "$records/$name.stopped" "$frozen/$name"
   if [ "${#left[@]}" -gt 0 ]; then
     systemctl reset-failed "${left[@]}" 2>/dev/null || true
     systemctl start "${left[@]}" || log "$name: could not start ${left[*]} again"
@@ -1412,6 +1453,19 @@ cmd_list() {
   fi
 }
 
+# A subvolume's size from its qgroup when quotas are on, else counted (which
+# walks the whole tree: slow for bulk data).
+btrfs_size() { # <location>
+  local id out
+  id="$(btrfs subvolume show "$top/$1" | awk '/Subvolume ID:/ { print $3 }')"
+  if out="$(btrfs qgroup show --raw "$top/$1" 2>/dev/null)"; then
+    if awk -v q="0/$id" '$1 == q { print $2; found = 1 } END { exit !found }' <<<"$out"; then
+      return 0
+    fi
+  fi
+  du -sbx "$top/$1" | cut -f1
+}
+
 cmd_size() {
   [ $# -gt 0 ] || usage
   local name
@@ -1420,8 +1474,7 @@ cmd_size() {
     if [ "$backend" = zfs ]; then
       printf '%s\t%s\n' "$name" "$(zfs get -Hp -o value referenced "$(field "$name" location)")"
     else
-      mount_top
-      printf '%s\t%s\n' "$name" "$(du -sbx "$top/$(field "$name" location)" | cut -f1)"
+      printf '%s\t%s\n' "$name" "$(btrfs_size "$(field "$name" location)")"
     fi
   done
 }

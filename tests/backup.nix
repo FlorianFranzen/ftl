@@ -358,6 +358,14 @@ pkgs.testers.runNixOSTest {
         for aside in asides("mail"):
             machine.succeed(f"fleet-state discard {aside}")
 
+    with subtest("size: from the dataset, or the qgroup once btrfs quotas are on"):
+        counted = int(machine.succeed("fleet-state size mail").split()[1])
+        assert counted > 1000000, counted
+        if not zfs:
+            machine.succeed("btrfs quota enable /var/lib/mail && btrfs quota rescan -w /var/lib/mail")
+            grouped = int(machine.succeed("fleet-state size mail").split()[1])
+            assert grouped > 1000000, grouped
+
     with subtest("discard takes nothing but a copy kept aside"):
         stem = "tank" if zfs else "@apps"
         machine.fail(f"fleet-state discard {'tank/apps' if zfs else '@apps'}/mail.aside-20260101T000000/../../apps/echo")
