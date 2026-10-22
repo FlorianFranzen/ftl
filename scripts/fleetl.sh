@@ -450,7 +450,10 @@ ensure() { # <generator> <force>
 
   echo "$gen: generating for $label"
   mkdir -p "$tmp/$scope/$gen"
-  HOST="${host:-fleet}" nix run ".#generate-$gen" -- "$tmp/$scope/$gen" "$tmp/in/$gen"
+  # the host's metadata (fleet.hosts.<h>), for generators that need more
+  # than its name; {} for the fleet's
+  if [ -n "$host" ]; then fleet_json "hosts.$host" >"$tmp/host.json"; else echo '{}' >"$tmp/host.json"; fi
+  HOST="${host:-fleet}" HOST_JSON="$tmp/host.json" nix run ".#generate-$gen" -- "$tmp/$scope/$gen" "$tmp/in/$gen"
   while IFS= read -r f; do
     install -m 644 "$tmp/$scope/$gen/$f" "$sdir/$f"
     written+=("$sdir/$f")

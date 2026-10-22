@@ -176,12 +176,15 @@ services, hosts their services and users, the stores all three).
 - `age-key`: a dedicated age key (`sops.age`; key in `identity.yaml`).
 - `fleet-ca` (scope fleet): an ECDSA P-256 CA, ten years
   (`nixos/fleet-ca.pub`; key in `nixos/identity.yaml`, admins only).
-- `host-tls`: an ECDSA P-256 certificate for `DNS:<host>`, server and
-  client use, five years, signed by `fleet-ca` (its inputs: the CA's
+- `host-tls`: an ECDSA P-256 certificate for `DNS:<host>` and what the
+  host's `tls.names` and `tls.addresses` list (as DNS and IP names), server
+  and client use, five years, signed by `fleet-ca` (its inputs: the CA's
   certificate and key, made first if missing): `tls.pub` next to
   `host.nix`, the key in the host's store as `host-tls/tls.key`.
 - Shape of any generator: `{ pkgs }: { description; scope; inputs;
   runtimeInputs; files; script; }`, where `files.<f> = { secret; store; }`.
+  The program is run with `HOST` (the host's name, `fleet` for the fleet)
+  and `HOST_JSON` (a file with `fleet.hosts.<h>`, `{}` for the fleet).
   `scope` is `host` (per host, listed in `host.nix`, files next to it and in
   its stores) or `fleet` (once, files in `nixos/` and in `nixos/secrets.yaml`
   or `nixos/identity.yaml`; `nixos/<name>.pub` is `fleet.keys.<name>`).

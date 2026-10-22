@@ -127,7 +127,12 @@ rec {
           out="''${1:?usage: generate-${name} <out> [<in>]}"
           in="''${2:-}"
           HOST="''${HOST:-host}"
-          export HOST out in
+          # the host's metadata as JSON (fleetl passes fleet.hosts.<h>)
+          if [ -z "''${HOST_JSON:-}" ]; then
+            HOST_JSON="$(mktemp)"
+            echo '{}' >"$HOST_JSON"
+          fi
+          export HOST HOST_JSON out in
           mkdir -p "$out"
           ${g.script}
         '';

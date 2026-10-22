@@ -112,7 +112,8 @@ each library function and module reads, provides and does.
   `secrets.yaml` as `<generator>/<file>` or, with `store = "identity"`, into
   `identity.yaml`. `host.nix` lists the generators a host uses (`generators`;
   `host-keys`, the SSH host and initrd keys, by default; `age-key` for a
-  dedicated age key; `host-tls` for a TLS certificate for the host's name,
+  dedicated age key; `host-tls` for a TLS certificate for the host's name
+  and what `tls.names` and `tls.addresses` in its `host.nix` list,
   good as server and client, signed by `fleet-ca`, the fleet's own CA,
   which is made once for the fleet: `nixos/fleet-ca.pub` for everyone,
   its key in `nixos/identity.yaml` for the admins). A generator with `scope = "fleet"` runs once for the
