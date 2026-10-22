@@ -32,6 +32,8 @@ let
   generatorFiles = {
     host-keys = ../generators/host-keys.nix;
     age-key = ../generators/age-key.nix;
+    fleet-ca = ../generators/fleet-ca.nix;
+    host-tls = ../generators/host-tls.nix;
   }
   // loader.loadTreeIfExists { dir = dir "generators"; };
 

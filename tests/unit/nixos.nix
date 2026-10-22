@@ -168,7 +168,9 @@ check "unit-nixos" (
           "age-key"
           "ca"
           "cert"
+          "fleet-ca"
           "host-keys"
+          "host-tls"
           "token"
         ];
         token = {
@@ -183,7 +185,9 @@ check "unit-nixos" (
           age-key = "host";
           ca = "fleet";
           cert = "host";
+          fleet-ca = "fleet";
           host-keys = "host";
+          host-tls = "host";
           token = "host";
         };
         certInputs = [

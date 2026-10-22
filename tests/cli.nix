@@ -170,6 +170,8 @@ pkgs.runCommand "cli"
     echo "$got"
     [ "$got" = "ssh -A -o BatchMode=yes -o ConnectTimeout=15 admin@beta -- sudo fleet-state list " ] || { echo "state list: unexpected command"; exit 1; }
     ! fleetl state restore alpha 2>/dev/null || { echo "restore without entry accepted"; exit 1; }
+    got="$(fleetl state init beta)"
+    [ "$got" = "ssh -A -o BatchMode=yes -o ConnectTimeout=15 admin@beta -- sudo fleet-state init " ] || { echo "state init: unexpected command"; exit 1; }
     ! fleetl state list nosuch 2>/dev/null || { echo "unknown host accepted"; exit 1; }
 
     # --- generators --------------------------------------------------------
@@ -185,7 +187,9 @@ pkgs.runCommand "cli"
     test -s nixos/ca.pub || { echo "fleet generate: no ca.pub"; exit 1; }
     yq -e '.["ca.key"]' nixos/identity.yaml >/dev/null || { echo "fleet generate: no ca.key in nixos/identity.yaml"; exit 1; }
     sops decrypt --extract '["ca.key"]' nixos/identity.yaml | grep -q 'PRIVATE KEY' || { echo "ca.key not readable by the admin"; exit 1; }
-    fleetl fleet generate | grep -q 'ca: the fleet has its files' || { echo "fleet generate ran again"; exit 1; }
+    again="$(fleetl fleet generate)"
+    grep -q '^ca: the fleet has its files' <<<"$again" || { echo "fleet generate ran again"; exit 1; }
+    grep -q '^fleet-ca: the fleet has its files' <<<"$again" || { echo "fleet generate ran fleet-ca again"; exit 1; }
 
     # a host generator with inputs: the ca (there) and the host keys (made
     # first), then the certificate, signed by the ca, into the host's stores
@@ -212,8 +216,36 @@ pkgs.runCommand "cli"
     ! fleetl host generate gamma nope 2>/dev/null || { echo "unknown generator accepted"; exit 1; }
 
     fleetl fleet show | tee show.log
-    grep -q '^  generators: ca$' show.log || { echo "fleet show: generators"; exit 1; }
+    grep -q '^  generators: ca fleet-ca$' show.log || { echo "fleet show: generators"; exit 1; }
     grep -q '^    nixos/identity.yaml$' show.log || { echo "fleet show: stores"; exit 1; }
+
+    # --- secrets move --------------------------------------------------------
+    # a key both hosts hold alike goes to the service's store (made here), and
+    # out of the hosts'; one they hold differently stays where it is
+    printf 'shared:\n  a: |\n    same\nown:\n  x: beta\n' >plain.yaml
+    sops --encrypt --filename-override nixos/hosts/beta/secrets.yaml --output nixos/hosts/beta/secrets.yaml plain.yaml
+    sops set nixos/hosts/gamma/secrets.yaml '["shared"]["a"]' '"same\n"'
+    sops set nixos/hosts/gamma/secrets.yaml '["own"]["x"]' '"gamma"'
+    ! fleetl secrets move --to nixos/services/mesh/secrets.yaml \
+      --from nixos/hosts/beta/secrets.yaml --from nixos/hosts/gamma/secrets.yaml own/x 2>/dev/null ||
+      { echo "secrets move took a key that differs"; exit 1; }
+    [ ! -e nixos/services/mesh/secrets.yaml ] || { echo "a refused move wrote the target"; exit 1; }
+    fleetl secrets move --to nixos/services/mesh/secrets.yaml \
+      --from nixos/hosts/beta/secrets.yaml --from nixos/hosts/gamma/secrets.yaml shared/a
+    [ "$(sops decrypt --extract '["shared"]["a"]' nixos/services/mesh/secrets.yaml)" = same ] ||
+      { echo "secrets move: the value did not arrive"; exit 1; }
+    for h in beta gamma; do
+      ! sops decrypt --extract '["shared"]["a"]' nixos/hosts/$h/secrets.yaml >/dev/null 2>&1 ||
+        { echo "secrets move left the key in $h"; exit 1; }
+      sops decrypt --extract '["own"]["x"]' nixos/hosts/$h/secrets.yaml | grep -qx $h ||
+        { echo "secrets move touched another key in $h"; exit 1; }
+    done
+    # a key the target has already is not overwritten, and stays in the source
+    sops set nixos/hosts/beta/secrets.yaml '["shared"]["a"]' '"other"'
+    ! fleetl secrets move --to nixos/services/mesh/secrets.yaml --from nixos/hosts/beta/secrets.yaml shared/a 2>/dev/null ||
+      { echo "secrets move overwrote a key in the target"; exit 1; }
+    sops decrypt --extract '["shared"]["a"]' nixos/hosts/beta/secrets.yaml | grep -qx other ||
+      { echo "a refused move took the key out of the source"; exit 1; }
 
     touch $out
   ''

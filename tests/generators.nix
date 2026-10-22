@@ -53,12 +53,25 @@ pkgs.runCommand "generators"
     ''
     + check "cert" (builtins.attrNames f.fleet.generators.cert.files)
     + ''
-      # the host key is a sops recipient after ssh-to-age
-      ssh-to-age < "$TMPDIR/host-keys/ssh.pub" | grep -q '^age1'
-      grep -q '^age1' "$TMPDIR/age-key/sops.age"
+        # the host key is a sops recipient after ssh-to-age
+        ssh-to-age < "$TMPDIR/host-keys/ssh.pub" | grep -q '^age1'
+        grep -q '^age1' "$TMPDIR/age-key/sops.age"
+        # ftl's own: the fleet's CA, and a host certificate signed by it, for the
+      # host's name, as server and as client
+      mkdir -p "$TMPDIR/fleet-ca" "$TMPDIR/in/fleet-ca" "$TMPDIR/host-tls" "$TMPDIR/in/host-tls/fleet-ca"
+      HOST=fleet ${programs.generate-fleet-ca}/bin/generate-fleet-ca "$TMPDIR/fleet-ca" "$TMPDIR/in/fleet-ca"
+      cp "$TMPDIR/fleet-ca/fleet-ca.pub" "$TMPDIR/fleet-ca/fleet-ca.key" "$TMPDIR/in/host-tls/fleet-ca/"
+      HOST=alpha ${programs.generate-host-tls}/bin/generate-host-tls "$TMPDIR/host-tls" "$TMPDIR/in/host-tls"
+      [ "$(ls "$TMPDIR/host-tls" | sort | tr '\n' ' ')" = "tls.key tls.pub " ] || { echo "host-tls wrote other files"; ls "$TMPDIR/host-tls"; exit 1; }
+      openssl verify -CAfile "$TMPDIR/fleet-ca/fleet-ca.pub" -purpose sslserver "$TMPDIR/host-tls/tls.pub"
+      openssl verify -CAfile "$TMPDIR/fleet-ca/fleet-ca.pub" -purpose sslclient "$TMPDIR/host-tls/tls.pub"
+      openssl x509 -in "$TMPDIR/host-tls/tls.pub" -noout -ext subjectAltName | grep -q 'DNS:alpha'
+      openssl x509 -in "$TMPDIR/fleet-ca/fleet-ca.pub" -noout -ext basicConstraints | grep -q 'CA:TRUE'
+      [ "$(openssl pkey -in "$TMPDIR/host-tls/tls.key" -pubout)" = "$(openssl x509 -in "$TMPDIR/host-tls/tls.pub" -noout -pubkey)" ]
+
       # the certificate was signed by the CA and names the host key
-      openssl verify -CAfile "$TMPDIR/ca/ca.pub" "$TMPDIR/cert/cert.pub"
-      grep -q "^# $(cut -d' ' -f1,2 "$TMPDIR/host-keys/ssh.pub")$" "$TMPDIR/cert/cert.pub"
-      touch "$out"
+        openssl verify -CAfile "$TMPDIR/ca/ca.pub" "$TMPDIR/cert/cert.pub"
+        grep -q "^# $(cut -d' ' -f1,2 "$TMPDIR/host-keys/ssh.pub")$" "$TMPDIR/cert/cert.pub"
+        touch "$out"
     ''
   )

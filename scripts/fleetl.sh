@@ -5,6 +5,9 @@
 #                                       whose recipients are not the rules' (--rekey: all)
 #   fleetl secrets render               .sops.yaml for the `fleet.sops` JSON on stdin
 #   fleetl secrets edit <store>         sops on a store (creates it)
+#   fleetl secrets move --to <store> --from <store>... <key>...
+#                                       keys into another store (a service's, say), if
+#                                       every source holds the same value; then out of them
 #   fleetl host init <name> [--system <s>] [--age-key]
 #                                       new host folder, its generators run
 #   fleetl host generate <name> [--force] [<generator>...]
@@ -25,6 +28,7 @@
 #                                       backup), frozen on <from>, the stores re-keyed;
 #                                       then commit and deploy both
 #   fleetl state list <host>            the host's state entries, and copies kept aside
+#   fleetl state init <host>            create the host's backup repositories (once)
 #   fleetl state size|stop|start <host> <entry>...
 #   fleetl state snapshots <host> [<entry>]
 #                                       their backups
@@ -191,6 +195,93 @@ secrets_edit() {
   fleet_json sops | jq -e --arg s "$store" '.stores[] | select(.path == $s)' >/dev/null ||
     die "$store is not a store of this fleet (see fleetl secrets sync)"
   exec sops "$store"
+}
+
+# Keys moved from stores into another (a service's, the fleet's), only if
+# every source holds the same value: written to the target first, checked
+# there, then removed from the sources, so a failure leaves a copy too many,
+# never one too few.  Needs the admin's key; values pass through this run's
+# 0700 scratch directory only.
+secrets_move() {
+  in_repo
+  local usage="usage: fleetl secrets move --to <store> --from <store> [--from <store>...] <key>..."
+  local target=""
+  local -a sources=() keys=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --to) target="${2:?$usage}"; shift ;;
+      --from) sources+=("${2:?$usage}"); shift ;;
+      -*) die "$usage" ;;
+      *) keys+=("$1") ;;
+    esac
+    shift
+  done
+  [ -n "$target" ] && [ "${#sources[@]}" -gt 0 ] && [ "${#keys[@]}" -gt 0 ] || die "$usage"
+  local stores store key
+  stores="$(fleet_json sops)"
+  for store in "$target" "${sources[@]}"; do
+    jq -e --arg s "$store" '.stores[] | select(.path == $s)' <<<"$stores" >/dev/null ||
+      die "$store is not a store of this fleet (see fleetl secrets sync)"
+  done
+  for store in "${sources[@]}"; do
+    [ -f "$store" ] || die "no $store"
+    [ "$store" != "$target" ] || die "$store is both source and target"
+  done
+
+  # the sops index of a key: a/b -> ["a"]["b"]
+  index() { jq -rn --arg k "$1" '$k | split("/") | map(tojson) | "[" + join("][") + "]"'; }
+
+  # 1. read: every source must hold the key, with the same value
+  local i value first
+  for i in "${!keys[@]}"; do
+    key="${keys[$i]}"
+    first=""
+    for store in "${sources[@]}"; do
+      value="$tmp/move.$i.$(echo "$store" | md5sum | cut -c1-8)"
+      (umask 077; sops decrypt --extract "$(index "$key")" "$store" >"$value") ||
+        die "$key is not in $store (or $store cannot be read with your key)"
+      if [ -z "$first" ]; then
+        first="$value"
+      elif ! cmp -s "$first" "$value"; then
+        die "$key differs between ${sources[0]} and $store; nothing moved"
+      fi
+    done
+    cp "$first" "$tmp/move.$i"
+  done
+  if [ -f "$target" ]; then
+    for key in "${keys[@]}"; do
+      ! sops decrypt --extract "$(index "$key")" "$target" >/dev/null 2>&1 || die "$key is in $target already; nothing moved"
+    done
+  fi
+
+  # 2. write the target
+  if [ -f "$target" ]; then
+    for i in "${!keys[@]}"; do
+      sops set "$target" "$(index "${keys[$i]}")" "$(jq -Rs . <"$tmp/move.$i")"
+    done
+  else
+    echo '{}' >"$tmp/move.json"
+    for i in "${!keys[@]}"; do
+      jq --arg k "${keys[$i]}" --rawfile v "$tmp/move.$i" 'setpath($k | split("/"); $v)' "$tmp/move.json" >"$tmp/move.json.new"
+      mv "$tmp/move.json.new" "$tmp/move.json"
+    done
+    yq -P -o yaml "$tmp/move.json" >"$tmp/move.yaml"
+    sops --encrypt --filename-override "$target" --output "$target" "$tmp/move.yaml"
+    git add -N "$target"
+  fi
+  for i in "${!keys[@]}"; do
+    sops decrypt --extract "$(index "${keys[$i]}")" "$target" | cmp -s - "$tmp/move.$i" ||
+      die "${keys[$i]} did not arrive in $target as it was; the sources are untouched"
+  done
+
+  # 3. only then out of the sources
+  for store in "${sources[@]}"; do
+    for key in "${keys[@]}"; do
+      sops unset "$store" "$(index "$key")"
+    done
+  done
+  echo "moved to $target: ${keys[*]}"
+  echo "next: point the modules at $target (a service's: sopsFile = service.sopsFile), commit both"
 }
 
 # --- show ----------------------------------------------------------------------
@@ -1001,6 +1092,7 @@ case "${1:-}" in
       sync) shift 2; secrets_sync "$@" ;;
       render) secrets_render ;;
       edit) secrets_edit "${3:-}" ;;
+      move) shift 2; secrets_move "$@" ;;
       *) usage ;;
     esac
     ;;
@@ -1023,7 +1115,7 @@ case "${1:-}" in
     ;;
   state)
     case "${2:-}" in
-      list | size | stop | start | snapshots | backup | restore | rollback | discard | thaw | drop | place | abort) state_cmd "${@:2}" ;;
+      list | size | init | stop | start | snapshots | backup | restore | rollback | discard | thaw | drop | place | abort) state_cmd "${@:2}" ;;
       copy) shift 2; state_copy "$@" ;;
       *) usage ;;
     esac
