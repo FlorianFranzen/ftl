@@ -370,6 +370,11 @@ pkgs.testers.runNixOSTest {
             grouped = int(machine.succeed("fleet-state size mail").split()[1])
             assert grouped > 1000000, grouped
 
+    with subtest("a receive takes timestamps in the future (a clock behind the sender's)"):
+        machine.succeed("mkdir -p /tmp/future && touch -d '+1 hour' /tmp/future/file /tmp/future")
+        machine.succeed("tar -C /tmp/future -c . | fleet-state receive later state")
+        machine.succeed("fleet-state abort later state")
+
     with subtest("discard takes nothing but a copy kept aside"):
         stem = "tank" if zfs else "@apps"
         machine.fail(f"fleet-state discard {'tank/apps' if zfs else '@apps'}/mail.aside-20260101T000000/../../apps/echo")

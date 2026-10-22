@@ -1244,8 +1244,10 @@ cmd_receive() {
   else
     log "$name: receiving"
     # tar only warns about what it could not set (ACLs, xattrs): that is a
-    # failure here, as is anything else it has to say
-    if ! tar -C "$opened" -x "${tar_flags[@]}" --same-permissions -f - 2>"$scratch/tar.err" ||
+    # failure here, as is anything else it has to say; but for a clock a
+    # little behind the sender's (timestamps "in the future"), which is no
+    # loss
+    if ! tar -C "$opened" -x "${tar_flags[@]}" --same-permissions --warning=no-timestamp -f - 2>"$scratch/tar.err" ||
       [ -s "$scratch/tar.err" ]; then
       cat "$scratch/tar.err" >&2 || true
       die "$name: the stream did not arrive whole; nothing kept"
