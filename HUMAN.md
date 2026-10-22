@@ -254,21 +254,49 @@ In order:
 8. **Run the drills above**: a backup, a restore with rollback on a cheap
    entry, and a move of a throwaway service, streamed and `--via backup`.
 
-Optional, not started:
-- **`fleetl state init <host>`.** The backup repositories are created on
-  the host (`sudo fleet-state init` or `sudo systemctl start
-  fleet-backup-init`); fleetl has no command for it. infra does not need
-  it: its repositories already exist on the Storage Box. It matters for
-  the next new host, where it saves a login.
-- **Fleet-wide generators in infra.** ftl can generate files once for the
-  whole fleet (`scope = "fleet"`, into `nixos/` and the shared store
-  `nixos/secrets.yaml`), and generators can read each other's files. infra
-  uses neither yet: no secret is shared by every host. Candidates are an
-  internal CA (TLS between the hosts, certificates per host signed by it)
-  and a WireGuard preshared key for the mesh. The monitor pair's
-  duplicated secrets on amphi and baro (`deadman`, `dkim`, `grafana`,
-  `ntfy`) are a different case: they belong to the monitor service's own
-  store, `nixos/services/monitor/secrets.yaml`, not the fleet's.
+Prepared, waiting for a session with the OpenPGP card (both decrypt or
+write existing stores):
+
+9. **Switch on TLS between the hosts** (infra `674e33a`, `nixos/modules/mesh-tls.nix`).
+   The code is deployed off; with it on, metrics and logs between the hosts
+   need a certificate of the fleet's own CA. In infra:
+
+   ```
+   nix run .#fleetl -- host generate amphi host-tls   # makes the CA first (nixos/fleet-ca.pub)
+   nix run .#fleetl -- host generate baro host-tls
+   nix run .#fleetl -- host generate darwin host-tls
+   nix run .#fleetl -- host generate turing host-tls
+   nix run .#fleetl -- secrets sync --check
+   ```
+
+   Commit `nixos/fleet-ca.pub`, `nixos/identity.yaml`, each host's `tls.pub`
+   and `secrets.yaml`, then set `infra.meshTls.enable = true;` for every
+   host (in `nixos/modules/defaults.nix`) and deploy all four in one go: a
+   monitor scraping over TLS a host not yet serving it sees it as down until
+   that host is deployed too. The test `mesh-tls` in infra shows the whole
+   path working.
+10. **Move the monitor pair's shared secrets into the monitor's store.**
+    amphi and baro each hold `deadman/url`, `grafana/*` and `ntfy/*`; what
+    both hold alike belongs in `nixos/services/monitor/secrets.yaml`.
+    `dkim/key` stays per host (each monitor signs with its own selector).
+    In infra, one key at a time, so that a key the two hold differently
+    stays where it is:
+
+    ```
+    for k in deadman/url grafana/admin-password grafana/secret-key ntfy/env ntfy/alertmanager-token; do
+      nix run .#fleetl -- secrets move --to nixos/services/monitor/secrets.yaml \
+        --from nixos/hosts/amphi/secrets.yaml --from nixos/hosts/baro/secrets.yaml "$k" ||
+        echo "$k stays per host"
+    done
+    ```
+
+    Then, in `nixos/services/monitor/monitor.nix`, give each moved key
+    `sopsFile = service.sopsFile;`, and commit the code and the three stores
+    together (sops-nix checks at build time that a key is where the module
+    says). Deploy amphi and baro.
+
+Done since: `fleetl state init <host>` creates a host's backup repositories
+from the admin's machine.
 
 ## Reviewing the code
 
