@@ -4,8 +4,10 @@ This is for whoever takes over ftl and the fleets built on it. It covers
 how to test the software, what is left to do before and after the next
 deploy, and how to review the backup, restore and move work.
 
-State as of 2026-10-22. `git log --oneline @{u}..` in each repository shows
-what is not pushed; check it before relying on anything below.
+State as of 2026-10-25. `git log --oneline @{u}..` in each repository shows
+what is not pushed; check it before relying on anything below. Two
+workstations hold clones of the three repositories, so a commit named
+here may exist on only one of them until it is pushed.
 
 infra's host stores are re-keyed for the hosts' SSH host keys (infra
 `5607cec`, pushed); `nix run .#fleetl -- secrets sync --check` in infra
@@ -23,11 +25,13 @@ secrets, since infra's configuration no longer uses the old age keys.
 
 The backup, restore and move work in ftl, and infra's adoption of it, was
 pushed on 2026-10-22, up to ftl `198b0f3` and infra `8e5eedf`; infra's
-re-keying (`5607cec`) followed. Not pushed as of this writing:
-- ftl: the decoupling of the mounts (`f5a0df5`, `docs/state-mounts.md`)
-  and this file's last update;
-- infra: the matching lock bump (`0bc2506`);
-- nixrc: four lock bumps, the last of them to `f5a0df5`.
+re-keying (`5607cec`) followed, and ftl is pushed up to `54f1828`. Not
+pushed as of this writing:
+- ftl: the smartcard and AGENTS.md work and what followed it (the last
+  section of this file), on the workstation it was written on;
+- infra: TLS between the hosts (`674e33a`) and two lock bumps to ftl
+  `54f1828`, unpushed on the other workstation;
+- nixrc: lock bumps to ftl `54f1828`, unpushed on the other workstation.
 
 Both consumers lock ftl by revision (`jq -r .nodes.ftl.locked.rev
 flake.lock`), so **ftl must always be pushed before them**. Otherwise
@@ -63,7 +67,14 @@ The commits, oldest first (`git log --oneline 59d0958^..` in ftl):
 | `5c7d10e` | state: blocked templates hold their instances | Fix round. |
 | `08428ae` | docs: HUMAN.md | This file. |
 | `198b0f3` | state: what the last review found | Fixes of the last review: `drop` only takes frozen copies, freezes survive reboots, undo prints what it could not do. |
-| (next) | state: mount units name nothing but the storage | The fix in `docs/state-mounts.md`. |
+| `f5a0df5` | state: mount units name nothing but the storage | The fix in `docs/state-mounts.md`. |
+| `863ce07` | docs: HUMAN.md after the re-keying | This file. |
+| `f06f4e8` | fleetl: secrets move, state init, and generators for a fleet CA | `fleetl secrets move`, `fleetl state init`, the `fleet-ca` and `host-tls` generators. |
+| `32014f5` | lib: a PEM key file is read whole | Certificates next to `host.nix` keep every PEM line. |
+| `13fcd7f` | generators: the host's metadata, and host-tls names what it lists | Generators get `HOST_JSON`; `host-tls` takes its names from `tls.addresses`. |
+| `f7b9e98` | docs: HUMAN.md, the steps the fleet CA and the monitor secrets need | This file. |
+| `54f1828` | state: a receive takes timestamps from a clock a little ahead | Fix in `fleet-state receive`. |
+| `567fb4f` | smartcard: readers registered in the metadata, AGENTS.md generated from it | See the last section. |
 
 The user-facing description is in `README.md`, under **State**, **Backups**
 and **Moving a service**, and in the `fleetl` command list. The map of the
@@ -110,7 +121,7 @@ nix build --no-link --no-write-lock-file -L ./tests/unstable#checks.x86_64-linux
 | `unit-loader`, `unit-static`, `unit-packages`, `unit-home`, `unit-nixos`, `unit-users`, `unit-deploy` | evaluation | Each `mk*` function on `tests/fixtures/layout`. `unit-nixos` includes stores, generators (scopes, inputs, cycles) and services. |
 | `flake-isolated`, `flake-full` | evaluation | `mkFlake` with one family at a time, and with all of them. |
 | `cli` | build | `fleetl` on stubs: `.sops.yaml` rendering, `host exec`, `state …` commands, fleet and host generators end to end. |
-| `generators` | build | Each generator writes exactly the files it declares; a certificate signed by the fixture's CA. |
+| `generators` | build | Each generator, ftl's own (`host-keys`, `age-key`, `fleet-ca`, `host-tls`) and the fixture's, writes exactly the files it declares; the certificates verify against their CA. |
 | `modules` | VM | A host with every ftl module enabled. |
 | `state-btrfs`, `state-zfs` | VM | `fleet.state` on an empty disk: boot without the filesystem, then creation and mounts. |
 | `backup-btrfs`, `backup-zfs` | VM | See below. |
@@ -306,8 +317,8 @@ About 5,000 lines changed across 46 files, but the risk is concentrated:
 
 | File | Lines | Why it matters |
 |---|---|---|
-| `scripts/fleet-state.sh` | ~1450 | Runs as root on every host with state. It stops services, renames and destroys datasets and subvolumes, handles credentials. |
-| `scripts/fleetl.sh` | ~1000 | Orchestrates moves across two hosts with an undo list; edits `service.nix`. |
+| `scripts/fleet-state.sh` | ~1500 | Runs as root on every host with state. It stops services, renames and destroys datasets and subvolumes, handles credentials. |
+| `scripts/fleetl.sh` | ~1200 | Orchestrates moves across two hosts with an undo list; edits `service.nix`. |
 | `modules/state.nix` | ~450 | Creates and mounts entries at boot and on every switch; installs `fleet-state`; activation snippet. |
 | `modules/backup.nix` | ~250 | The rustic profiles, units, timer and the data `fleet-state` reads. |
 | `tests/backup.nix`, `tests/move.nix` | ~840 | What is actually proven. |
@@ -441,3 +452,99 @@ under `set -o errexit -o nounset -o pipefail` and are built through
 shellcheck. `fleet-state.sh` excludes SC2030 and SC2031 for its `scoped`
 subshells. When reading them, watch for functions called as conditions
 (`if f`, `f || …`), where bash turns errexit off for the whole call.
+
+## Smartcards, AGENTS.md, ssh and Nix trust (2026-10-24)
+
+`567fb4f`, `smartcard: readers registered in the metadata, AGENTS.md
+generated from it`, and the milestones that follow it (see "Milestones"
+below). It also touches access, client and mkDeploy. Two sibling
+repositories go with it:
+
+| Repository | Path | Branch | State |
+|---|---|---|---|
+| nix-piv | `~/Nix/nix-piv` | `main` | `services.piv-agent.accessGroup` added, see its `HUMAN.md`; published on GitHub. |
+| deploy-rs (clone of serokell's) | `~/Nix/deploy-rs` | `sudo-copy` | `sudoCopy` implemented and tested; not committed, not proposed upstream yet. |
+
+### What it does
+
+| Piece | Where | In short |
+|---|---|---|
+| Reader registration | `lib/nixos/smartcards.nix` (the vocabulary in `lib/smartcard.nix`), `smartcard` in host.nix, mkFlake's `smartcard` | Readers by USB vendor, product, serial or port, for every host or one; `presence` is `attended` or `headless`. Validated eagerly; `fleet.hosts.<h>.smartcard`. |
+| `fleet.smartcard` | `modules/smartcard.nix` | On only when a reader is registered. pcscd is bound to exactly those readers: a udev rule sets `PCSCLITE_IGNORE=1` on every USB device and `0` on the registered ones (pcscd has no allow-list). scdaemon through pcscd (`disable-ccid`). Attended: yubikey-touch-detector. Headless: nix-piv's `piv-agent`, its group socket, the builder joined to it. |
+| AGENTS.md | `lib/agents.nix`, `modules/agents.nix`, `fleetl agents sync`, check `fleet-agents` | The repository's AGENTS.md from the metadata alone (layout, hosts, services, users, caches, hardware key rules); each host's `/etc/AGENTS.md` adds sections from its modules (smartcard, access, builder, layers, comin, client). |
+| ssh blocks | `modules/access.nix` (`fleet.access.sshConfig`) | A `Host` block per fleet host in `/etc/ssh/ssh_config`: agent forwarded (pam_rssh sudo needs it), multiplexed for ten minutes, `<host>-unlock` for hosts with `initrd.pub`. |
+| Fleet caches | `lib/nixos/caches.nix`, `modules/client.nix` | `cache = { publicKeys; url?; port?; statusUrl?; }` in host.nix or service.nix becomes `fleet.caches`; every other host substitutes from it. |
+| Nix trust | `modules/nix.nix` | Flakes on, channels off, nobody but root trusted (`trustWheel = false`; a warning when `@wheel` slips in anyway). Unsigned closures go through `sudo nix-daemon` (`pushCommand` in `lib/agents.nix`: `nix copy --no-check-sigs --to 'ssh-ng://<host>?remote-program=sudo%20nix-daemon'`). |
+| `mkDeploy` | `lib/deploy.nix` | `sudoCopy` set when `sshUser` is not root; ignored by deploy-rs until its `sudoCopy` lands. |
+
+### Testing
+
+New checks, run like the others:
+
+| Check | Kind | Covers |
+|---|---|---|
+| `unit-smartcard` | evaluation | Registration (fleet-wide and per host, `fleetReaders = false`, bad ids refused), the udev rules, scdaemon, touch detector, the hand-over to a stubbed `piv-agent`, the warning without it. |
+| `unit-agents` | evaluation | The rendered AGENTS.md and a host's `/etc/AGENTS.md`; `fleet-agents` exists only once the repository has an AGENTS.md. |
+| `unit-fleet` | evaluation | The ssh blocks (with and without an alias), the fleet's caches, the Nix defaults and the `@wheel` warning, the repository as a git URL (`lib/repo.nix`). |
+| `agents` | build | The fixture's and the template's committed AGENTS.md are current; a stale one fails. |
+| `smartcard` | VM, 2 nodes | QEMU's emulated CCID reader (`usb-ccid`): the host that registered it sees it through pcscd, the other gets `PCSCLITE_IGNORE=1` and no reader. Also scdaemon and the touch detector. |
+| `push` | VM, 2 nodes | Nobody trusted: an admin's unsigned closure is refused; `sudo nix-daemon` without the forwarded agent is refused; with it the closure lands (no TTY needed); deploy-rs' `sudoCopy` URL (`ssh://…?remote-program=sudo -u root nix-store`) works; later copies find nothing to add. |
+
+The fixture's beta host now registers a headless reader and the web service
+announces a cache, so `unit-nixos` and `flake-full` cover them too.
+
+nix-piv and deploy-rs have their own tests; see nix-piv's `HUMAN.md`, and
+`nix build -L .#checks.x86_64-linux.sudo-copy` in deploy-rs.
+
+On real hardware, once a host registers a reader:
+- `udevadm info -q property -p /sys/bus/usb/devices/<port> | grep PCSCLITE_IGNORE`
+  shows `0` for the registered key and `1` for anything else;
+- `opensc-tool -l` lists only registered readers;
+- `gpg --card-status` still works (through pcscd), and `gpgconf --kill
+  scdaemon` frees the reader for PIV tools.
+
+### Where the risk is
+
+- **The udev filter.** On a host with a registered reader, every other CCID
+  reader becomes invisible to pcscd. That is the point, but a wrongly typed
+  vendor, product, serial or port hides the user's own key. YubiKeys report
+  no USB serial by default; register them by vendor and product, or `port`.
+- **`trustWheel = false`.** Pushing a laptop-built closure with plain
+  `nixos-rebuild --target-host` or deploy-rs fails on hosts that pick this
+  up. Push through `sudo nix-daemon` first, or set `fleet.nix.trustWheel =
+  true` on those hosts. Closures from the builder carry the cache signature
+  and are unaffected.
+- **`fleet-agents` and `fleet-sops` exist once their file does.** A fleet
+  that never ran `fleetl agents sync` (or `secrets sync`) has no such check;
+  once the file is committed, a stale one fails `nix flake check`.
+- **Agent forwarding to every fleet host.** Root on a target can use the
+  forwarded agent while the connection lasts; keys that need a touch limit
+  that. `fleet.access.sshConfig.forwardAgent = false` turns it off.
+- **The headless wiring** depends on nix-piv's option names (`accessGroup`,
+  `sharedSocket`, `socket`, `user`, `group`, `pinCredential`). It is
+  detected through `options`, so an older nix-piv without `accessGroup`
+  still evaluates, with the builder on the agent's own socket.
+
+### Remaining steps
+
+1. **nixrc:** run `nix run .#fleetl -- agents sync` and commit `AGENTS.md`;
+   register the readers (fawkes, lovelace and hull attended, pavlov
+   headless with `fleetReaders = false`); move the forge's cache key into
+   `cache.publicKeys` of its service.nix; drop what ftl now does
+   (`nixos/modules/nix.nix`, scdaemon `disable-ccid`, the touch detector
+   in `profiles/hardware/smartcard.nix`).
+2. **nix-piv in nixrc:** lock the published nix-piv, add
+   `nix-piv.nixosModules.agent` to `nixos.sharedModules`.
+3. **deploy-rs:** commit `sudo-copy`, propose it upstream (it overlaps
+   with the open PR #334, which also sets `remote-program`). Until it
+   lands, push with `nix copy` through `sudo nix-daemon` first.
+
+### Milestones
+
+The review of 2026-10-25 (a survey of nixrc and infra, an audit of
+ftl) is being worked through in milestones, each one reviewed before the
+next. Each is one commit, named after its milestone.
+
+| Milestone | Content |
+|---|---|
+| M1: fixes before the push | `repo` as a flake reference no longer breaks `ftl-layers` (`lib/repo.nix`); the template no longer sets a follows on ftl, which has no inputs; `fleet-agents`/`fleet-sops` exist only once their file does; a warning when `@wheel` undoes `trustWheel = false`; the smartcard vocabulary shared (`lib/smartcard.nix`), caches in their own part (`lib/nixos/caches.nix`), `fleet.smartcard` no longer imports the builder; one push command (`pushCommand`); `unit-fleet` split off `unit-agents`, the `smartcard` VM test trimmed to the hardware. |

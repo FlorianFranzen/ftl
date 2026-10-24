@@ -14,6 +14,11 @@
 #
 # A host's `fqdn` (free-form host data) is its address and known_hosts name
 # when present; `address` picks something else, e.g. `h: h.network.ipv4.address`.
+#
+# The hosts' Nix daemons trust nobody but root (fleet.nix), so an `sshUser`
+# other than root copies the closure through sudo (`sudoCopy`, deploy-rs
+# with sudo-copy support; others ignore the setting): its sudo authenticates
+# against the forwarded agent (fleet.access), and activation uses it anyway.
 {
   hosts,
   nixosConfigurations,
@@ -25,6 +30,8 @@
   sshUser ? "root",
   user ? "root",
   sshOpts ? [ ],
+  # copy the closure as root through sudo (an untrusted sshUser needs it)
+  sudoCopy ? sshUser != "root",
   # hosts to leave out
   exclude ? [ ],
   # nixpkgs' lib; deploy-rs carries one
@@ -72,3 +79,4 @@ in
   );
   inherit sshUser knownHosts;
 }
+// lib.optionalAttrs sudoCopy { inherit sudoCopy; }

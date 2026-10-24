@@ -59,7 +59,10 @@ let
   '';
 in
 {
-  imports = [ ./layers.nix ];
+  imports = [
+    ./layers.nix
+    ./agents.nix
+  ];
 
   options.fleet.comin = {
     enable = lib.mkOption {
@@ -91,6 +94,18 @@ in
   config = lib.mkIf cfg.enable (
     lib.optionalAttrs hasComin {
       services.comin.postDeploymentCommand = lib.mkDefault hook;
+
+      fleet.agents.sections.comin = {
+        order = 50;
+        text = ''
+          ## Deployment
+
+          comin deploys this host: it follows the fleet's repository and switches
+          to what the deployed branch says. A local `nixos-rebuild switch` is
+          undone by its next deployment; change the repository instead.
+          `comin status` shows what is deployed.
+        '';
+      };
     }
   );
 }

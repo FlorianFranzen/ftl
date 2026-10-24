@@ -127,6 +127,7 @@ check "unit-nixos" (
           };
           fqdn = "alpha.example.org";
           roles = [ "web" ];
+          smartcard = null;
         };
         beta = {
           name = "beta";
@@ -137,6 +138,16 @@ check "unit-nixos" (
           users = [ "alice" ];
           generators = [ "host-keys" ];
           keys.age = "age1880pyzlyypv0cmec6e3tgwww9tgum9cywqn5743flkdz6krlxy2sksedxt";
+          smartcard = {
+            presence = "headless";
+            readers.builder = {
+              vendor = "1050";
+              product = "0407";
+              port = "1-4";
+              serial = null;
+              description = null;
+            };
+          };
         };
         gamma = {
           name = "gamma";
@@ -146,6 +157,7 @@ check "unit-nixos" (
           services = [ "mesh" ];
           users = [ "alice" ];
           generators = [ "host-keys" ];
+          smartcard = null;
         };
       };
     };
@@ -282,6 +294,7 @@ check "unit-nixos" (
           roles.default.hosts = [ "alpha" ];
           layers = [ ];
           port = 8080;
+          cache.publicKeys = [ "ftl-test-1:6CA2VCkcTQDS8JL6HcoXOOHZWCqjV+3baLKM86c7dcw=" ];
         };
         mesh = {
           name = "mesh";

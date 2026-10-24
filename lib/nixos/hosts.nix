@@ -70,6 +70,7 @@ let
     "users"
     "dir"
     "generators"
+    "smartcard"
   ];
 
   normalize =
@@ -87,6 +88,7 @@ let
         services = builtins.attrNames ownServices;
         users = builtins.attrNames (ctx.usersOf hostName);
         generators = spec.generators or [ "host-keys" ];
+        smartcard = ctx.normalizeSmartcard hostName (spec.smartcard or { });
         dir = spec.dir or null;
         data = builtins.removeAttrs spec reserved;
       };
@@ -163,6 +165,7 @@ rec {
         services
         users
         generators
+        smartcard
         ;
     }
   ) hosts';

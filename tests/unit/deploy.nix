@@ -69,6 +69,23 @@ check "unit-deploy" (
       };
     };
 
+    # an sshUser other than root copies through sudo, root does not need to
+    testSudoCopy = {
+      expr = {
+        admin = d.sudoCopy or false;
+        root =
+          (ftl.lib.mkDeploy {
+            inherit (n) nixosConfigurations;
+            hosts = n.fleet.hosts;
+            deploy = deploy-rs;
+          }) ? sudoCopy;
+      };
+      expected = {
+        admin = true;
+        root = false;
+      };
+    };
+
     # beta has no ssh.pub (an age key only): plain ssh, by name
     testUnpinned = {
       expr = {

@@ -9,8 +9,9 @@
 #   static/  mkStatic    the `static` module argument (no outputs)
 #   users/   mkUsers     fleet.users, accounts on the hosts (through mkNixos)
 #
-# plus checks for all of them and `fleet.manifest`, consumed by the ftl
-# pipeline. Everything the library itself exports is below `fleet`.
+# plus checks for all of them, `fleet.manifest`, consumed by the ftl pipeline,
+# and `fleet.agents`, the AGENTS.md of the repository (`fleetl agents sync`).
+# Everything the library itself exports is below `fleet`.
 # Missing folders are skipped; folder names can be changed with
 # `layout.<family> = "dir"` (or null to disable). Unrecognized arguments are
 # deep-merged into the outputs.
@@ -38,6 +39,11 @@ args@{
   users ? { },
   # sops: extraRules, creation rules appended to the generated .sops.yaml
   sops ? { },
+  # smartcard readers every host accepts: { presence?; readers.<name> = { vendor;
+  # product?; serial?; port?; description?; }; } (hosts add their own in host.nix)
+  smartcard ? { },
+  # AGENTS.md: extra, strings or files appended to the generated one
+  agents ? { },
   ...
 }:
 let
@@ -58,6 +64,8 @@ let
     "home"
     "users"
     "sops"
+    "smartcard"
+    "agents"
   ];
   passthru = builtins.removeAttrs args knownArgs;
 
@@ -161,6 +169,7 @@ let
         layers = nixos.layers or { };
         services = nixos.services or { };
         users = users';
+        inherit smartcard;
         specialArgs = nixos.specialArgs or { };
         extraProfiles = nixos.extraProfiles or { };
         homes = if homeOut != null then homeOut.modules else { };
@@ -209,14 +218,10 @@ let
         ];
         stores = builtins.toJSON sopsOut;
         passAsFile = [ "stores" ];
-        committed = if builtins.pathExists (src + "/.sops.yaml") then src + "/.sops.yaml" else "";
+        committed = src + "/.sops.yaml";
       }
       ''
         fleetl secrets render <"$storesPath" >generated.yaml
-        if [ -z "$committed" ]; then
-          echo "no .sops.yaml in the repository; run fleetl secrets sync" >&2
-          exit 1
-        fi
         if ! diff -u "$committed" generated.yaml; then
           echo ".sops.yaml is stale; run fleetl secrets sync" >&2
           exit 1
@@ -224,10 +229,52 @@ let
         touch "$out"
       '';
 
-  fleetChecks = lib.optionalAttrs (hasFleet && sopsOut.stores != [ ]) (
-    lib.genAttrs systems (system: {
-      fleet-sops = sopsCheck system;
-    })
+  # --- AGENTS.md ---------------------------------------------------------------
+  # What an agent working on the repository or a host must know, rendered from
+  # the metadata alone (no host is evaluated for it).
+  agentsText = (import ./agents.nix { inherit lib; }).fleet {
+    inherit name repo;
+    inherit (nixosOut) caches;
+    hosts = nixosOut.fleet.hosts;
+    inherit (nixosOut) services users;
+    extra = agents.extra or [ ];
+  };
+
+  # AGENTS.md must be what `fleetl agents sync` writes.
+  agentsCheck =
+    system:
+    let
+      pkgs = packages.pkgsFor system;
+    in
+    pkgs.runCommand "fleet-agents"
+      {
+        nativeBuildInputs = [ pkgs.diffutils ];
+        generated = builtins.toFile "AGENTS.md" agentsText;
+        committed = src + "/AGENTS.md";
+      }
+      ''
+        if ! diff -u "$committed" "$generated"; then
+          echo "AGENTS.md is stale; run fleetl agents sync" >&2
+          exit 1
+        fi
+        touch "$out"
+      '';
+
+  # A generated file is checked once the repository has it: a fleet that never
+  # ran the sync command is not red, a stale file is.
+  hasFile = file: builtins.pathExists (src + "/${file}");
+  fleetChecks = lib.filterAttrs (_: c: c != { }) (
+    lib.optionalAttrs hasFleet (
+      lib.genAttrs systems (
+        system:
+        lib.optionalAttrs (sopsOut.stores != [ ] && hasFile ".sops.yaml") {
+          fleet-sops = sopsCheck system;
+        }
+        // lib.optionalAttrs (nixosOut.fleet.hosts != { } && hasFile "AGENTS.md") {
+          fleet-agents = agentsCheck system;
+        }
+      )
+    )
   );
 
   checks = lib.foldl' lib.recursiveUpdate { } [
@@ -272,6 +319,10 @@ let
       fleet.users = nixosOut.users;
       # the fleet's own public files (nixos/<name>.pub)
       fleet.keys = nixosOut.keys;
+      # the binary caches the hosts and services announce (fleet.client uses them)
+      fleet.caches = nixosOut.caches;
+      # the repository's AGENTS.md (`fleetl agents sync` writes it)
+      fleet.agents = agentsText;
       # every secret store and its recipients, for `fleetl secrets sync`
       fleet.sops = sopsOut;
       # the generators as programs (fleetl host generate), and what they make

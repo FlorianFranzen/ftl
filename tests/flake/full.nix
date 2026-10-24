@@ -151,13 +151,23 @@ check "flake-full" (
     testChecks = {
       expr = builtins.mapAttrs (_: builtins.attrNames) f.checks;
       expected = {
-        x86_64-linux = [ "fleet-sops" ] ++ homeNames ++ [
+        x86_64-linux = [
+          "fleet-agents"
+          "fleet-sops"
+        ]
+        ++ homeNames
+        ++ [
           "nixos-alpha"
           "nixos-gamma"
           "nixos-layer-svc"
           "nixos-layer-tools"
         ];
-        aarch64-linux = [ "fleet-sops" ] ++ homeNames ++ [
+        aarch64-linux = [
+          "fleet-agents"
+          "fleet-sops"
+        ]
+        ++ homeNames
+        ++ [
           "nixos-beta"
           "nixos-layer-tools"
         ];
@@ -172,6 +182,8 @@ check "flake-full" (
       };
       expected = {
         names = [
+          "agents"
+          "caches"
           "generators"
           "hosts"
           "keys"

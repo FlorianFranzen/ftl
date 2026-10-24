@@ -10,6 +10,9 @@ in
   mkStatic = import ./static.nix;
   mkUsers = import ./users.nix;
   mkDeploy = import ./deploy.nix;
+  # { lib } -> { gitUrl }: the git URL of a repo given as a git URL or flake reference
+  repo = import ./repo.nix;
+  mkAgents = import ./agents.nix;
   mkLayer = import ./layer.nix;
   mkManifest = import ./manifest.nix;
 }

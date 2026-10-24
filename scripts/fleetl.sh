@@ -8,6 +8,7 @@
 #   fleetl secrets move --to <store> --from <store>... <key>...
 #                                       keys into another store (a service's, say), if
 #                                       every source holds the same value; then out of them
+#   fleetl agents sync [--check]        AGENTS.md from the fleet's metadata
 #   fleetl host init <name> [--system <s>] [--age-key]
 #                                       new host folder, its generators run
 #   fleetl host generate <name> [--force] [<generator>...]
@@ -282,6 +283,35 @@ secrets_move() {
   done
   echo "moved to $target: ${keys[*]}"
   echo "next: point the modules at $target (a service's: sopsFile = service.sopsFile), commit both"
+}
+
+# --- agents --------------------------------------------------------------------
+
+# AGENTS.md, what an agent working on the fleet must know: `fleet.agents`,
+# rendered from the metadata alone (the fleet-agents check compares).
+agents_sync() {
+  in_repo
+  local check=0
+  case "${1:-}" in
+    --check) check=1 ;;
+    "") ;;
+    *) usage ;;
+  esac
+
+  nix eval --raw .#fleet.agents >"$tmp/AGENTS.md"
+
+  if [ -f AGENTS.md ] && cmp -s "$tmp/AGENTS.md" AGENTS.md; then
+    echo "AGENTS.md is up to date"
+    return 0
+  fi
+  if [ -f AGENTS.md ]; then diff -u AGENTS.md "$tmp/AGENTS.md" || true; fi
+  if [ "$check" = 1 ]; then
+    die "AGENTS.md is stale; run fleetl agents sync"
+  fi
+
+  install -m 644 "$tmp/AGENTS.md" AGENTS.md
+  git add -N AGENTS.md
+  echo "wrote AGENTS.md"
 }
 
 # --- show ----------------------------------------------------------------------
@@ -1096,6 +1126,12 @@ case "${1:-}" in
       render) secrets_render ;;
       edit) secrets_edit "${3:-}" ;;
       move) shift 2; secrets_move "$@" ;;
+      *) usage ;;
+    esac
+    ;;
+  agents)
+    case "${2:-}" in
+      sync) shift 2; agents_sync "$@" ;;
       *) usage ;;
     esac
     ;;

@@ -36,10 +36,12 @@
 # targets or DNS records from the host list. `fleet.services.<name>` is every
 # service's metadata the same way, `fleet.users.<name>` every user with the
 # hosts it has an account on resolved, `fleet.keys.<name>` the fleet's own
-# public files (nixos/<name>.pub, made by fleet-scoped generators).
+# public files (nixos/<name>.pub, made by fleet-scoped generators), and
+# `fleet.caches` the binary caches hosts and services announce.
 #
 # The parts live in nixos/: hosts, services, users, sops (the stores and their
-# recipients), generators and layers. Each is a function of the shared context
+# recipients), generators, layers, smartcards (reader registration) and
+# caches. Each is a function of the shared context
 # (the arguments below plus every other part's results), so the data flows
 # between them without a fixed order: users need the services' hosts, hosts
 # need their services and users, the stores need all three. This file only
@@ -73,6 +75,9 @@
   homes ? { },
   # home configuration name -> NixOS modules it needs on the host (see mkHome)
   homeCompanions ? { },
+  # the fleet's smartcard defaults: { presence?; readers.<name> = { vendor; ... }; }
+  # (see nixos/smartcards.nix)
+  smartcard ? { },
 }:
 let
   lib = nixpkgs.lib;
@@ -87,6 +92,7 @@ let
     else
       null;
   dir = sub: if src == null then null else src + "/${sub}";
+  repoUrl = (import ./repo.nix { inherit lib; }).gitUrl repo;
   exists = sub: src != null && builtins.pathExists (dir sub);
 
   # The arguments and helpers every part sees, plus every part's results.
@@ -108,6 +114,8 @@ let
         pkgsFor
         homes
         homeCompanions
+        smartcard
+        name
         ;
     }
     // import ./nixos/hosts.nix ctx
@@ -116,6 +124,8 @@ let
     // import ./nixos/sops.nix ctx
     // import ./nixos/generators.nix ctx
     // import ./nixos/layers.nix ctx
+    // import ./nixos/smartcards.nix ctx
+    // import ./nixos/caches.nix ctx
   );
 
   inherit (ctx)
@@ -136,6 +146,7 @@ let
     layerKind
     layerSystems
     nixosLayers
+    caches
     ;
 
   nixosModules = loader.loadTreeIfExists { dir = dir "modules"; };
@@ -165,7 +176,9 @@ let
         fleet.layers.installed = lib.genAttrs host.layers (l: {
           kind = layerKind l;
         });
-        fleet.layers.repo = lib.mkIf (repo != null) (lib.mkDefault repo);
+        # git fetches these: a flake reference becomes its git URL
+        fleet.layers.repo = lib.mkIf (repo != null) (lib.mkDefault repoUrl);
+        fleet.client.repo = lib.mkIf (repo != null) (lib.mkDefault repoUrl);
         fleet.secrets = {
           file = lib.mkIf (host.dir != null && builtins.pathExists (host.dir + "/secrets.yaml")) (
             host.dir + "/secrets.yaml"
@@ -177,6 +190,13 @@ let
             src + "/secrets.yaml"
           );
         };
+        fleet.smartcard = lib.mkIf (host.smartcard != null) {
+          presence = lib.mkDefault host.smartcard.presence;
+          readers = lib.mkDefault host.smartcard.readers;
+        };
+        fleet.agents.enable = lib.mkDefault true;
+        fleet.nix.enable = lib.mkDefault true;
+        fleet.client.enable = lib.mkIf (lib.any (c: c.host != hostName) caches) (lib.mkDefault true);
         networking.hostName = lib.mkDefault hostName;
         nixpkgs.hostPlatform = lib.mkDefault host.system;
       };
@@ -190,6 +210,7 @@ let
     services = serviceInfo;
     users = userInfo;
     keys = fleetKeys;
+    inherit caches;
   };
 
   specialArgs' = specialArgs // {
@@ -280,6 +301,7 @@ assert builtins.all builtins.isAttrs (builtins.attrValues users');
     sops
     generators
     generatorPrograms
+    caches
     ;
   hosts = hosts';
   services = serviceInfo;

@@ -40,6 +40,7 @@ in
   imports = [
     ./meta.nix
     ./dirs.nix
+    ./agents.nix
   ];
 
   options.fleet.builder = {
@@ -506,6 +507,24 @@ in
     # remote builders without sshKey authenticate through the agent
     // lib.optionalAttrs (cfg.sshAuthSock != null) {
       nix-daemon.environment.SSH_AUTH_SOCK = cfg.sshAuthSock;
+    };
+
+    fleet.agents.sections.builder = {
+      order = 30;
+      text = ''
+        ## Build pipeline
+
+        This host builds the fleet: ${
+          lib.concatMapStringsSep ", " (l: "`${l.unitName}`") laneServices
+        } run as `${cfg.user}` on their timers (`systemctl start <unit>` for a run
+        now, `journalctl -u <unit>` for its log). The pipeline's state in
+        `${cfg.stateDir}` is its own: never edit it, and never run the pipeline's
+        git or nix commands there by hand. What it built last is in
+        `${cfg.statusDir}`.${
+          lib.optionalString (cfg.cache.dir != null)
+            " The binary cache is `${cfg.cache.dir}`; only the pipeline writes to it."
+        } `${rootDir}/keys` holds the pipeline's keys: never read, copy or print them.
+      '';
     };
 
     systemd.timers = builtins.listToAttrs (

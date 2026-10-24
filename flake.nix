@@ -22,6 +22,9 @@
         backup = ./modules/backup.nix;
         access = ./modules/access.nix;
         secrets = ./modules/secrets.nix;
+        smartcard = ./modules/smartcard.nix;
+        agents = ./modules/agents.nix;
+        nix = ./modules/nix.nix;
         default.imports = import ./modules/all.nix;
       };
 

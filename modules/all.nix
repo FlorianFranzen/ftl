@@ -10,4 +10,7 @@
   ./backup.nix
   ./access.nix
   ./secrets.nix
+  ./smartcard.nix
+  ./agents.nix
+  ./nix.nix
 ]

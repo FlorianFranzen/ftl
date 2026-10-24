@@ -92,7 +92,8 @@ it, and produces every host-related output. The work is split by entity into
 `lib/nixos/`: `hosts.nix` (discovery, validation, `fleet.hosts`),
 `services.nix` (discovery, roles, the `service` argument, `nixosServices`),
 `users.nix` (placement, homes and their companions, `fleet.users`),
-`sops.nix` (stores and recipients), `generators.nix` and `layers.nix`. Each
+`sops.nix` (stores and recipients), `generators.nix`, `layers.nix`,
+`smartcards.nix` (reader registration) and `caches.nix` (`fleet.caches`). Each
 part is a function of one shared context: the arguments below plus every
 other part's results (`lib.fix`), so the parts are read in any order while
 the data flows acyclically (services need the host specs, users the
@@ -107,7 +108,8 @@ services, hosts their services and users, the stores all three).
   arguments `hosts`, `layers`, `services`, `users` (explicit specs merged over
   the discovered ones), `homes` and `homeCompanions` (from `mkHome`),
   `static`, `specialArgs`, `sharedModules`, `extraProfiles`, `pkgsFor`,
-  `name`, `repo`, `root` (the repository root, for store paths).
+  `name`, `repo`, `root` (the repository root, for store paths), `smartcard`
+  (the readers every host accepts).
 - Provides:
   - `nixosConfigurations.<h>` (each with `fleetArgs`, the exact
     `nixosSystem` arguments, for VM tests), `nixosModules`, `nixosProfiles`,
@@ -119,21 +121,29 @@ services, hosts their services and users, the stores all three).
   - `sops.stores` (every store with its recipients: pgp and age keys, and the
     SSH host keys still to be converted), `generators` (what each makes) and
     `generatorPrograms system` (each as a program);
+  - `caches` (`fleet.caches`: every `cache` a host.nix or service.nix
+    announces, once per serving host, with its url, status url and keys);
   - `checks` (`nixos-<h>`, `nixos-layer-<l>`) and `manifestEntries`.
 - How, in order:
   1. hosts and services are discovered and validated (unknown layers,
      services, generators, home configurations fail eagerly);
   2. a host's layers are its own plus its services'; its users are the admins
      plus whoever lists it or one of its services; its home per user comes
-     from `user.nix` (`home` as a name or `{ default; <host>; }`);
+     from `user.nix` (`home` as a name or `{ default; <host>; }`); its
+     `smartcard` is the fleet's readers (unless `fleetReaders = false`) plus
+     its own, with a presence, or null when there are none. Reader ids are
+     validated here, eagerly;
   3. every host gets: `sharedModules`, ftl's modules (`modules/*.nix`, all
      disabled by default), `nixos/modules`, its services' modules (wrapped so
      they receive the `service` argument), its own modules, the companions of
      its users' homes, and a meta module that sets `fleet.meta`,
      `fleet.layers.installed`, `fleet.secrets.file`/`ageKeyFile`,
-     `networking.hostName` and `nixpkgs.hostPlatform`;
+     `fleet.layers.repo` and `fleet.client.repo` (the repository as a git
+     URL), `fleet.smartcard.{presence,readers}`, `fleet.agents.enable`,
+     `fleet.nix.enable`, `fleet.client.enable` (when another host serves a
+     cache), `networking.hostName` and `nixpkgs.hostPlatform`;
   4. the special arguments are `profiles`, `homes`, `static`, `fleet`
-     (`hosts`, `services`, `users`, `self`).
+     (`hosts`, `services`, `users`, `caches`, `self`).
 - Service modules: a module file is wrapped with `lib.setFunctionArgs` so
   that `service` (metadata, `role`, `dir`, `sopsFile`) is injected without
   the module system looking it up; `nixosServices.<s>` uses the same wrapper
@@ -144,6 +154,34 @@ services, hosts their services and users, the stores all three).
   `secrets.yaml` for its hosts, the admins and the users listing it; a
   user's for that user. A host is a recipient by its `sops.age` if present,
   else by its `ssh.pub`.
+
+### `lib/repo.nix`, `lib/smartcard.nix`
+
+- `repo` (`ftl.lib.repo { inherit lib; }`): `gitUrl`, the git URL of a
+  repository given as a git URL or a flake reference (`github:`, `gitlab:`,
+  `sourcehut:`, `git+…`). mkNixos uses it for `fleet.layers.repo` and
+  `fleet.client.repo`, which git fetches; `fleet.meta.repo` keeps the form
+  given.
+- `smartcard.nix`: what a reader registration is (presences, reader
+  attributes, the USB id pattern, the text a reader is shown with), shared
+  by `lib/nixos/smartcards.nix`, `modules/smartcard.nix` and
+  `lib/agents.nix`.
+
+### `lib/agents.nix` — `mkAgents`
+
+- Reads: `{ lib }`, then the fleet's metadata: `hosts` (`fleet.hosts`),
+  `services`, `users`, `caches`, `name`, `repo`, and `extra` (strings or
+  files appended).
+- Provides: `fleet` (the repository's `AGENTS.md`, `fleet.agents`), `host`
+  (one host's part, the head of its `/etc/AGENTS.md`), `rules presence`
+  (the hardware key rules for `attended`, `headless` or no reader).
+- How: plain string rendering of metadata, never of an evaluated
+  configuration, so the file is cheap to produce and stable for the
+  `fleet-agents` check. The rules are mind-the-gap's and nix-piv's practice:
+  - PIN tries are scarce, and a provisioned card's PUK is blocked;
+  - a touch needs a person;
+  - scdaemon holds every reader;
+  - a card under a running agent must not be opened exclusively.
 
 ### `lib/layer.nix` — `mkLayer`
 
@@ -164,7 +202,8 @@ services, hosts their services and users, the stores all three).
 
 - Reads: `fleet.hosts`, `nixosConfigurations`, the deploy-rs flake, `address`
   (host data → address, default `fqdn` or name), `sshUser`, `user`,
-  `sshOpts`, `exclude`.
+  `sshOpts`, `exclude`, `sudoCopy` (default: `sshUser` is not root; the
+  closure is copied as root through sudo, since the hosts trust nobody else).
 - Provides: the `deploy` output (`nodes`, `sshUser`) and `knownHosts`, a file
   with every host's `ssh.pub`; nodes with a key are pinned to it
   (`HostKeyAlias`, `UserKnownHostsFile`, `StrictHostKeyChecking=yes`).
@@ -198,11 +237,14 @@ services, hosts their services and users, the stores all three).
 - Reads: `src` (the repository), `inputs` (`nixpkgs` required;
   `home-manager`, `sops-nix` used when present), `name`, `repo`, `systems`,
   `layout` (folder names, `null` disables a family), `overlays`, `config`,
-  `nixos.*`, `home.*`, `users`, `sops.extraRules`; anything else is
-  deep-merged into the outputs.
+  `nixos.*`, `home.*`, `users`, `sops.extraRules`, `smartcard` (readers for
+  every host), `agents.extra`; anything else is deep-merged into the outputs.
 - Provides: everything above as flake outputs, plus `fleet.sops` (stores +
-  `extraRules`), `packages.<sys>.fleetl` and `generate-<g>`, `apps.<sys>.fleetl`,
-  `checks.<sys>.fleet-sops`.
+  `extraRules`), `fleet.caches`, `fleet.agents` (the repository's AGENTS.md),
+  `packages.<sys>.fleetl` and `generate-<g>`, `apps.<sys>.fleetl`,
+  `checks.<sys>.fleet-sops` and `checks.<sys>.fleet-agents` (the committed
+  file against what the sync command would write; each exists only once the
+  repository has the file).
 - How: decides statically which families exist (so touching one output never
   evaluates another's nixpkgs), builds the integration module
   (`modules/flake.nix`) and hands the home results to `mkNixos`.
@@ -220,13 +262,16 @@ under `fleet.*`.
 | `flake` (injected, not exported) | `inputs`, overlays, nixpkgs config, home results | `nixpkgs.overlays`/`config`, flake registry and `NIX_PATH` for `exportInputs`, `system.configurationRevision`, home-manager wiring | mkFlake only |
 | `builder` | `fleet.builder.*` (repos and lanes, signing, verify, cache, remote builders), `fleet.rootDir` | the `ftl-pipeline-<repo>-<lane>` services and timers, the `ftl` user, directories, nix-daemon signing | no |
 | `cache` | `fleet.cache.*`, `fleet.rootDir` | nginx serving `cache/` and `status/` | no |
-| `client` | `fleet.client.*` | substituters, gc defaults, `ftl-status` | no |
+| `client` | `fleet.client.*`; `fleet.caches` from the `fleet` argument when present | substituters (its own and the fleet's caches but the host's own), gc defaults, `ftl-status` pointed at a fleet cache's status page | `enable` comes from mkNixos when another host serves a cache; standalone, set `substituters` |
 | `layers` | `fleet.layers.*` (`installed` set by mkNixos, `repo`, `verify`, timer) | `environment.profiles` for packages layers, a systemd generator linking units layers, `ftl-layers` and its update service and timer, `fleet.layers.hook` | `installed` comes from mkNixos; settable by hand |
 | `comin` | `fleet.comin.*`, whether comin's and lanzaboote's modules are present | `services.comin.postDeploymentCommand` = the hook (system profile sync for lanzaboote, then layer update) | no |
 | `state` | `fleet.state.<name>` (`path`, `kind`, `units`, `service`, `backup`, `snapshots`, `zfs.properties`), `fleet.storage` (`btrfsDevice`, `zfsPool`, `zfsProperties`, `tool.enable`), `fleet.backup.enable` | the `fleet-state` service creating subvolumes/datasets (wanted by `local-fs.target`, `Before=` the mounts, none of which depends on it: a mount unit's text changes only with its storage, see `docs/state-mounts.md`), one mount unit per entry, `RequiresMountsFor` on its units, assertions (fixed uids or `DynamicUser`, entry names); the `fleet-state` tool and `/etc/fleet-state/state.json` (backend, device or pool, host, entries with ZFS properties) where there are entries, a ZFS pool or backups; an activation snippet lifting the blocks of entries no longer declared | no |
 | `backup` | `fleet.backup.*` (`repositories.<kind>`, `passwordFile`, `credentialFiles`, `packages`, `schedule`, `retention`, `metrics.textfileDir`), `fleet.state` | `/etc/rustic/<kind>.toml` (also `fleet.backup.profiles`), `/etc/fleet-state/backup.json`, the `fleet-backup` service and timer (`fleet-state backup --all`), `fleet-backup-init` | no |
-| `access` | `fleet.access.*` (`users` defaults to the host's fleet users, `sudo`, `knownHosts`, `initrdPort`); the `fleet` argument when present | accounts with keys and no password, sshd without passwords or root, sudo via pam_rssh, every host's keys in `known_hosts` | `users` and `knownHosts` need `fleet`; standalone, set `fleet.access.users` |
+| `access` | `fleet.access.*` (`users` defaults to the host's fleet users, `sudo`, `knownHosts`, `initrdPort`, `sshConfig`); the `fleet` argument when present | accounts with keys and no password, sshd without passwords or root, sudo via pam_rssh, every host's keys in `known_hosts`, a block per fleet host in `/etc/ssh/ssh_config` (agent forwarded, multiplexed; `<host>-unlock` for the initrd) | `users`, `knownHosts` and the ssh blocks need `fleet`; standalone, set `fleet.access.users` |
 | `secrets` | `fleet.secrets.*` (`file`, `shared` and `ageKeyFile` set by mkNixos); whether sops-nix's module is present | `sops.defaultSopsFile`, `sops.age.keyFile`, `sops.gnupg.sshKeyPaths = []`; `shared` for modules to point a secret at | `file` comes from mkNixos; settable by hand |
+| `smartcard` | `fleet.smartcard.*` (`readers` and `presence` set by mkNixos from the metadata, `scdaemon`, `touchDetector`, `agent`); whether nix-piv's `services.piv-agent` and `programs.yubikey-touch-detector` exist | pcscd bound to the registered readers (udev `PCSCLITE_IGNORE`), scdaemon through pcscd, the touch detector (attended), nix-piv's agent with its group socket and the builder wired to it (headless) | `readers` comes from mkNixos; settable by hand |
+| `agents` | `fleet.agents.*` (`enable` set by mkNixos, `sections`); the `fleet` argument when present | `/etc/AGENTS.md`: the host's part of the repository's file (lib/agents.nix) and the sections other modules add (smartcard, access, builder, layers, comin, client) | without `fleet`, only the sections |
+| `nix` | `fleet.nix.*` (`enable` set by mkNixos, `trustWheel`) | flakes on, channels off; nobody but root trusted unless `trustWheel` (unsigned closures arrive through `sudo nix-daemon`, see `tests/push.nix`) | no |
 | `scripts` (a function, not a module) | `pkgs` | the packaged scripts: `fleetl` (+`ftl` alias), `ftl-layers`, `ftl-status`, `ftl-pipeline`, `ftl-cache-retention` | no |
 
 ## Standalone use
@@ -237,7 +282,9 @@ Each module can be imported on its own (`ftl.nixosModules.<name>`); what
 | module | set by hand |
 |---|---|
 | `layers` | `fleet.layers.installed.<l>.kind`, `fleet.layers.repo` |
-| `access` | `fleet.access.users` (without the `fleet` argument there are no accounts and no known hosts) |
+| `access` | `fleet.access.users` (without the `fleet` argument there are no accounts, no known hosts and no ssh blocks) |
+| `smartcard` | `fleet.smartcard.readers` (and `presence`) |
+| `agents`, `nix` | `enable` |
 | `secrets` | `fleet.secrets.file`, `fleet.secrets.shared`, `fleet.secrets.ageKeyFile` |
 | `meta` | nothing; `fleet.meta.host` is null, which `nixosServices` tolerates (`service.role = []`) |
 | `nixosServices.<s>` | the special arguments its modules use (`fleet`, `profiles`, ...); it is meant for other configurations of the same fleet |
@@ -249,10 +296,17 @@ arguments; stores need `root`.
 
 - `host.nix`, `service.nix`, `user.nix`: plain attribute sets; the reserved
   attributes are, for hosts, `system importance layers services users
-  generators` (plus `name`, `modules`, `dir`, never set by hand); for
+  generators smartcard` (plus `name`, `modules`, `dir`, never set by hand); for
   services `hosts roles layers` (plus `name`, `modules`, `dir`); for users
   `admin hosts services home uid groups` (plus `name`, `keys`, `dir`).
-  Everything else is free-form data and appears in `fleet.*`.
+  Everything else is free-form data and appears in `fleet.*`. Free-form
+  attributes that ftl reads: `fqdn` (address and known_hosts name), `cache`
+  on hosts and services (`fleet.caches`).
+- `smartcard` in `host.nix`: `{ presence ? "attended"; readers.<name> = {
+  vendor; product?; serial?; port?; description?; }; fleetReaders ? true; }`
+  or `null`; ids are four lower-case hex digits.
+- `AGENTS.md` (repository root): written by `fleetl agents sync` from
+  `fleet.agents`, compared by the `fleet-agents` check.
 - `ftl-layers.json` (repository root): `{ "<layer>": "latest" | "<commit>" }`,
   written by the pipeline, read by `ftl-layers`.
 - `fleet.manifest`: `{ name; repo; version = 1; attrs.<sys>.<check> = { kind
@@ -268,7 +322,8 @@ arguments; stores need `root`.
 ## scripts/
 
 - `fleetl.sh` (admin's machine, inside the repository): reads the flake's
-  `fleet` output (`nix eval --json .#fleet.*`); `secrets sync` renders
+  `fleet` output (`nix eval --json .#fleet.*`); `agents sync` writes
+  `AGENTS.md` from `nix eval --raw .#fleet.agents`; `secrets sync` renders
   `.sops.yaml` from `fleet.sops` (SSH host keys through ssh-to-age) and
   re-keys the stores whose recipients, which sops keeps in the clear, differ from their rule (`sops updatekeys`, needs the admin's key);
   `secrets move` decrypts each key from every source (all must hold the
@@ -400,6 +455,7 @@ arguments; stores need `root`.
 `tests/unstable` are the flakes that supply them (nixpkgs, home-manager,
 sops-nix, comin, deploy-rs of the channel, ftl as a relative input). Unit
 tests call each `mk*` on `tests/fixtures/layout`; `flake-isolated` and
-`flake-full` go through `mkFlake`; `cli` and `generators` build what the CLI
-uses; the VM tests cover the modules, layers, pipeline, cache, state and
-secrets on real machines.
+`flake-full` go through `mkFlake`; `cli`, `agents` and `generators` build
+what the CLI uses and checks; the VM tests cover the modules, smartcard
+readers, pushing through sudo, layers, pipeline, cache, state and secrets on
+real machines.

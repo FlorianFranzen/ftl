@@ -75,6 +75,8 @@ let
   '';
 in
 {
+  imports = [ ./agents.nix ];
+
   options.fleet.layers = {
     installed = lib.mkOption {
       type = lib.types.attrsOf (
@@ -222,6 +224,19 @@ in
             Persistent = true;
             RandomizedDelaySec = "1h";
           };
+        };
+
+        fleet.agents.sections.layers = {
+          order = 40;
+          text = ''
+            ## Layers
+
+            This host's layers (${lib.concatMapStringsSep ", " (n: "`${n}`") layerNames}) are Nix
+            profiles under `${profileDir}/`, updated without a system rebuild, to
+            the revision `ftl-layers.json` names. `ftl-layers list` shows them, `ftl-layers
+            update` installs the deployed revision and `ftl-layers rollback <layer>`
+            goes back one generation; never change these profiles with `nix-env`.
+          '';
         };
       }
     ]
