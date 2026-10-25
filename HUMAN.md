@@ -1,10 +1,11 @@
 # Handover
 
-This is for whoever takes over ftl and the fleets built on it. It covers
-how to test the software, what is left to do before and after the next
-deploy, and how to review the backup, restore and move work.
+This is for whoever takes over ftl and the fleets built on it: the state of
+the work, what each commit did, and what is left to do before and after the
+next deploy. How to test it is in docs/testing.md, how to review it in
+docs/review.md.
 
-State as of 2026-10-25. `git log --oneline @{u}..` in each repository shows
+State as of 2026-10-29. `git log --oneline @{u}..` in each repository shows
 what is not pushed; check it before relying on anything below. Two
 workstations hold clones of the three repositories, so a commit named
 here may exist on only one of them until it is pushed.
@@ -24,14 +25,14 @@ secrets, since infra's configuration no longer uses the old age keys.
 | nixrc | `/etc/nixos` | `master` | The workstations built with ftl. |
 
 The backup, restore and move work in ftl, and infra's adoption of it, was
-pushed on 2026-10-22, up to ftl `198b0f3` and infra `8e5eedf`; infra's
-re-keying (`5607cec`) followed, and ftl is pushed up to `54f1828`. Not
-pushed as of this writing:
-- ftl: the smartcard and AGENTS.md work and what followed it (the last
-  section of this file), on the workstation it was written on;
-- infra: TLS between the hosts (`674e33a`) and two lock bumps to ftl
-  `54f1828`, unpushed on the other workstation;
-- nixrc: lock bumps to ftl `54f1828`, unpushed on the other workstation.
+pushed on 2026-10-22 (infra up to `8e5eedf`, its re-keying `5607cec`
+after). On 2026-10-29 ftl's history was rewritten from the root into the
+ten commits below, the smartcard and AGENTS.md work included; the tree is
+unchanged. Not pushed as of this writing:
+- ftl: the rewritten history (a force-push);
+- infra: TLS between the hosts (`674e33a`) and two lock bumps to the old
+  ftl tip, unpushed on the other workstation;
+- nixrc: lock bumps to the old ftl tip, unpushed on the other workstation.
 
 Both consumers lock ftl by revision (`jq -r .nodes.ftl.locked.rev
 flake.lock`), so **ftl must always be pushed before them**. Otherwise
@@ -43,38 +44,26 @@ If signing on push meant `git push --signed`, that leaves nothing on the
 commits; if it meant signed commits, that is still to decide, for what is
 pushed and for what is not.
 
-ftl and infra use a `scope: sentence` subject and a prose body. nixrc uses
-short imperative subjects without a body.
+ftl and infra use a `scope: sentence` subject; ftl's bodies are two to
+four lines, infra's prose. nixrc uses short imperative subjects without a
+body.
 
 ## What the ftl work does
 
-The commits, oldest first (`git log --oneline 59d0958^..` in ftl):
+The commits, oldest first (`git log --oneline` in ftl):
 
-| Commit | Subject | In short |
-|---|---|---|
-| `59d0958` | fleetl: secrets sync re-keys the stores whose recipients differ | `secrets sync` compares each store's recipients (sops keeps them in the clear) with its rule. |
-| `51aae67` | fleet: the aliases of the rename are gone | The `ftl.*` option mirror, `ftlPeers`, `ftlManifest`, `peers` and the old layer kinds are removed. |
-| `1f71383` | lib: mkNixos is split by entity under lib/nixos | `lib/nixos.nix` now only assembles; hosts, services, users, sops, generators and layers live under `lib/nixos/`. |
-| `1e8588e` | fleetl: host exec runs a command on one host or on all | Runs a command over ssh, pinned to the host's `ssh.pub`. |
-| `077a1e5` | generators: fleet-wide ones, and inputs from other generators | `scope = "fleet"` and `inputs = [ "<gen>/<file>" ]`. |
-| `4a7009a` | backup: fleet.backup puts fleet.state into rustic, through fleet-state | The new `modules/backup.nix` and the host tool `scripts/fleet-state.sh`. |
-| `5567e80` | state: restore an entry in place, from the admin's machine too | First restore, and `fleetl state …`. |
-| `35ba05f` | state: restores swap a fresh copy in | Restore rebuilt around "write beside, then swap". |
-| `723d1ff` | fleetl: service move takes a service and its state to another host | `fleetl service move`, streaming. |
-| `acdb4d4` | fleetl: service move --via backup | The target restores from the source's repository. |
-| `0908bd6` | state: what the reviews … found | The largest fix round. |
-| `487cea7` | state: per-entry scopes for stop and start | Fix round. |
-| `5c7d10e` | state: blocked templates hold their instances | Fix round. |
-| `08428ae` | docs: HUMAN.md | This file. |
-| `198b0f3` | state: what the last review found | Fixes of the last review: `drop` only takes frozen copies, freezes survive reboots, undo prints what it could not do. |
-| `f5a0df5` | state: mount units name nothing but the storage | The fix in `docs/state-mounts.md`. |
-| `863ce07` | docs: HUMAN.md after the re-keying | This file. |
-| `f06f4e8` | fleetl: secrets move, state init, and generators for a fleet CA | `fleetl secrets move`, `fleetl state init`, the `fleet-ca` and `host-tls` generators. |
-| `32014f5` | lib: a PEM key file is read whole | Certificates next to `host.nix` keep every PEM line. |
-| `13fcd7f` | generators: the host's metadata, and host-tls names what it lists | Generators get `HOST_JSON`; `host-tls` takes its names from `tls.addresses`. |
-| `f7b9e98` | docs: HUMAN.md, the steps the fleet CA and the monitor secrets need | This file. |
-| `54f1828` | state: a receive takes timestamps from a clock a little ahead | Fix in `fleet-state receive`. |
-| `567fb4f` | smartcard: readers registered in the metadata, AGENTS.md generated from it | See the last section. |
+| Subject | In short |
+|---|---|
+| ftl: flake template library | Layout-driven outputs, layers, the update pipeline, the binary cache. |
+| fleet: hosts, services, state and users from the layout | The `fleet` namespace, `service.nix`, `fleet.state`, `users/` and the access module. |
+| secrets: a store per host, service and user, managed with fleetl | sops stores from the layout; `fleetl`. |
+| lib: mkDeploy, homes per host, host key generators, test flakes | mkDeploy, homes per host, `nixos/generators/`, `tests/stable` and `tests/unstable`. |
+| fleet: review fixes, code map, aliases gone, mkNixos split | `docs/architecture.md`, `lib/nixos/`, `secrets sync` by recipients, `host exec`. |
+| generators: fleet-wide ones, and inputs from other generators | `scope = "fleet"` and `inputs = [ "<gen>/<file>" ]`. |
+| state: backup, restore and service moves through fleet-state | `modules/backup.nix`, `scripts/fleet-state.sh`, `fleetl state …`, `fleetl service move`; the riskiest part (see `docs/review.md`). |
+| fleetl: secrets move, state init, a fleet CA; HUMAN.md | `fleetl secrets move`, `fleetl state init`, `fleet-ca` and `host-tls`; this file. |
+| smartcard: registered readers only; AGENTS.md from the metadata | See the last section; M1 below. |
+| fleet: less to write downstream, consistent names, swap tests | M2 to M4 below, with their reviews. |
 
 The user-facing description is in `README.md`, under **State**, **Backups**
 and **Moving a service**, and in the `fleetl` command list. The map of the
@@ -84,138 +73,21 @@ In infra, `99c1d01` moves the Storage Box backups onto ftl's `fleet.backup`;
 the later infra and nixrc commits named `flake: …ftl…` only bump the lock
 (infra's last one also runs the setup service in its backup test).
 
-## Testing
+## Testing and reviewing
 
-### Prerequisites
-
-- **Nix:** flakes enabled. The suites were run with Nix 2.34.
-- **VM tests:** KVM, a few GB of RAM per test, and disk for the VM images.
-  The `move` test runs four VMs at once.
-- **Time:** a full suite took tens of minutes on a 32-core machine. Single
-  checks take one to five minutes.
-
-### The ftl suites
-
-The tests live in `tests/`. `tests/default.nix` defines the checks. Two
-flakes run them, `tests/stable` and `tests/unstable`, each pinning nixpkgs,
-home-manager, sops-nix, comin and deploy-rs of its channel, with ftl as a
-relative input. The working tree is tested; uncommitted files must be known
-to git (`git add -N`).
-
-Everything, both channels:
-
-```
-cd ~/Nix/ftl
-nix flake check -L --no-write-lock-file ./tests/unstable
-nix flake check -L --no-write-lock-file ./tests/stable
-```
-
-One check:
-
-```
-nix build --no-link --no-write-lock-file -L ./tests/unstable#checks.x86_64-linux.<name>
-```
-
-| Check | Kind | Covers |
-|---|---|---|
-| `unit-loader`, `unit-static`, `unit-packages`, `unit-home`, `unit-nixos`, `unit-users`, `unit-deploy` | evaluation | Each `mk*` function on `tests/fixtures/layout`. `unit-nixos` includes stores, generators (scopes, inputs, cycles) and services. |
-| `flake-isolated`, `flake-full` | evaluation | `mkFlake` with one family at a time, and with all of them. |
-| `cli` | build | `fleetl` on stubs: `.sops.yaml` rendering, `host exec`, `state …` commands, fleet and host generators end to end. |
-| `generators` | build | Each generator, ftl's own (`host-keys`, `age-key`, `fleet-ca`, `host-tls`) and the fixture's, writes exactly the files it declares; the certificates verify against their CA. |
-| `modules` | VM | A host with every ftl module enabled. |
-| `state-btrfs`, `state-zfs` | VM | `fleet.state` on an empty disk: boot without the filesystem, then creation and mounts. |
-| `backup-btrfs`, `backup-zfs` | VM | See below. |
-| `move` | VM, 4 nodes | See below. |
-| `layers`, `pipeline`, `pipeline-agent`, `cache` | VM | Layers and the update pipeline (older, unchanged by this work). |
-| `services` | VM | sops-nix decrypting with the SSH host key. |
-
-The backup tests (`tests/backup.nix`) cover:
-- backup and init, labels and tags, metrics, leftover snapshots;
-- restore by swap, rollback and discard;
-- an entry nested inside another;
-- dependents, timers and template sockets stopped and restarted;
-- repeated and shared stops;
-- `freeze --stopped`;
-- refused repository accesses;
-- the top directory's owner and mode, including a backup made without the
-  tags, as all of infra's are so far;
-- an entry with a dataset below it.
-
-The move test (`tests/move.nix`) runs an admin machine (fleetl with a
-stubbed `nix eval`, but real ssh), a btrfs source, a ZFS target and an sftp
-"storage box". It covers:
-- refusals;
-- a failed move undone without touching what was in the way;
-- a streamed move;
-- a move `--via backup`;
-- both hosts switched to the moved configuration, with the target running
-  the service on the received state;
-- the source's frozen copies dropped.
-
-If a VM test fails, `nix log <drv>` has the whole run. Searching it for `!!!`
-finds the failing subtest.
-
-### infra's own checks
-
-infra has its own VM tests in `tests/`, including `backup-btrfs` and
-`backup-zfs`. These run the real Storage Box module against an sshd on
-port 23 playing the box. There is also the `fleet-sops` check:
-
-```
-cd ~/Denkmuskel/infra
-nix build --no-link -L .#checks.x86_64-linux.backup-btrfs .#checks.x86_64-linux.backup-zfs .#checks.x86_64-linux.fleet-sops
-```
-
-To try an infra change against a local, unpushed ftl, add
-`--override-input ftl path:/home/florian/Nix/ftl` (or
-`git+file:///home/florian/Nix/ftl?rev=<rev>` for an exact commit). The same
-works for `nix run .#fleetl -- …`.
-
-To compare a host before and after a change without touching the working
-tree, evaluate both versions of ftl and diff them:
-
-```
-a=$(nix eval --raw .#nixosConfigurations.darwin.config.system.build.toplevel.drvPath)
-b=$(nix eval --raw --override-input ftl path:/home/florian/Nix/ftl .#nixosConfigurations.darwin.config.system.build.toplevel.drvPath)
-nix run nixpkgs#nix-diff -- "$a" "$b"
-```
-
-Do not `git stash` in these repositories to get a "before" state. They are
-worked on in parallel.
-
-### Drills on the real hosts, after the deploy
-
-The VM tests do not touch the real Storage Box or real services, and they
-reboot only once (a source between its freeze and its deploy). Before trusting restores and moves with
-anything that matters, run these once.
-
-1. **A backup.** On any host:
-   - `sudo systemctl start fleet-backup`, then `sudo fleet-state snapshots`.
-   - The new snapshots carry `fleet-entry:`, `fleet-service:` and
-     `fleet-root:` tags.
-   - `/var/lib/prometheus-node-exporter-text-files/fleet-backup.prom` exists.
-   - The alerts `BackupOverdue` and `BackupMissing` stay quiet.
-2. **A restore of something cheap.** For example `ntfy` or `alertmanager` on
-   amphi:
-   - `fleetl state restore amphi ntfy`; the service comes back on its own.
-   - `fleetl state list amphi` shows the copy kept aside.
-   - `fleetl state rollback amphi ntfy` swaps it back.
-   - `fleetl state discard amphi <aside>` removes it.
-3. **A move of a throwaway service.** Do not start with a real service.
-   - Add a small service (one state entry, one unit, a fixed uid) to two
-     hosts' reach, and give it some data.
-   - `fleetl service move <svc> <host>`, commit, deploy the target, then
-     the source.
-   - Check the data on the target, then `fleetl state drop <source> <entry> <kind>`
-     (data left behind with `--without-data` needs `--force`).
-   - Repeat with `--via backup`.
+docs/testing.md: how to run the suites (`checks.<sys>.fast` per commit, the
+VM tests as `nix flake check`), what each check covers, infra's checks and
+the drills on real hosts. docs/review.md: where the risk is, the order to
+read the code in, the invariants, and the known gaps.
 
 ## Remaining steps
 
 In order:
 
-1. **Push ftl first, then infra and nixrc.** The consumers' locks name
-   ftl's last commit, which must be fetchable before they are. Decide on
+1. **Push, with no deploy in between:** infra's unpushed commits from the
+   other workstation, then ftl (`git push --force-with-lease`), then the
+   migrations of nixrc and infra (M5 below), which relock them to the new
+   ftl. Reset every other ftl checkout to the new `origin/main`. Decide on
    signatures first (see above).
 2. **Check that every store still matches its rule** (it did when this was
    written):
@@ -262,7 +134,7 @@ In order:
      Mount with `subvolid=5` to see it.
    - darwin, turing (ZFS): any `<dataset>@infra-backup` snapshots
      (`zfs list -t snapshot | grep infra-backup`).
-8. **Run the drills above**: a backup, a restore with rollback on a cheap
+8. **Run the drills** (docs/testing.md, "Drills on the real hosts"): a backup, a restore with rollback on a cheap
    entry, and a move of a throwaway service, streamed and `--via backup`.
 
 Prepared, waiting for a session with the OpenPGP card (both decrypt or
@@ -309,155 +181,11 @@ write existing stores):
 Done since: `fleetl state init <host>` creates a host's backup repositories
 from the admin's machine.
 
-## Reviewing the code
-
-### Where the risk is
-
-About 5,000 lines changed across 46 files, but the risk is concentrated:
-
-| File | Lines | Why it matters |
-|---|---|---|
-| `scripts/fleet-state.sh` | ~1500 | Runs as root on every host with state. It stops services, renames and destroys datasets and subvolumes, handles credentials. |
-| `scripts/fleetl.sh` | ~1200 | Orchestrates moves across two hosts with an undo list; edits `service.nix`. |
-| `modules/state.nix` | ~450 | Creates and mounts entries at boot and on every switch; installs `fleet-state`; activation snippet. |
-| `modules/backup.nix` | ~250 | The rustic profiles, units, timer and the data `fleet-state` reads. |
-| `tests/backup.nix`, `tests/move.nix` | ~840 | What is actually proven. |
-
-The earlier commits (`59d0958` to `077a1e5`) touch evaluation-time code
-only. Their output is checked by the unit and flake tests, and infra's
-hosts evaluated to identical derivations across the split. They can be
-reviewed quickly.
-
-### Suggested order
-
-1. Read `README.md` (**State**, **Backups**, **Moving a service**) for the
-   promised behaviour, and `docs/architecture.md` (`scripts/` and the module
-   table) for how it is built.
-2. Read `modules/state.nix` and `modules/backup.nix`: what lands on a host,
-   and what `/etc/fleet-state/state.json` and `backup.json` contain.
-3. Read `scripts/fleet-state.sh` from the top, in this order:
-   - the startup (`LC_ALL=C`, `inherit_errexit`, root check);
-   - scratch space, cleanup, signals (`critical`, `uncritical`), `scoped`,
-     the two locks;
-   - locations (`location_of`, `create_location`, `rename_location`,
-     `destroy_location`, `is_aside`);
-   - units (`declared_units`, `triggers_of`, `needing`, `block`,
-     `quiesce`, `resume`);
-   - `swap_in` and `swap_recover`;
-   - snapshots, backups, restore, rollback, discard;
-   - moves (`send`, `access`, `take_access`, `receive`, `place`, `freeze`,
-     `drop`).
-4. Read `service_move` and `state_copy` in `scripts/fleetl.sh`, with the
-   undo list in mind.
-5. Read the two VM tests and compare them with what you expected from 1.
-
-### Invariants to check
-
-These are what the code relies on. A reviewer's job is mostly to find a path
-that breaks one.
-
-- **Nothing writes into a live entry.** Content is only written into
-  `<location>.incoming`. It reaches the entry by rename, with the entry's
-  units stopped, blocked and unmounted.
-- **Nothing is destroyed that fleet-state did not make or was not named.**
-  `destroy_location` is reached from:
-  - `discard`, which takes strict `.aside-<time>` names only;
-  - `drop`, which takes only frozen copies of entries the host no longer
-    declares, or anything at the location with `--force`;
-  - `abort`, which takes `.incoming` only;
-  - the cleanups of `.incoming`.
-  It never recurses into children.
-- **A failed swap leaves the entry as it was, running.** `swap_recover` is
-  registered before the first stop.
-- **What stopped is started again, and nothing else.** Each entry records
-  its own scope. A unit another stopped entry still holds is handed to that
-  entry's record. Blocks are `/run` drop-ins: they are lifted by `start`, by
-  a reboot, or by a deploy that no longer declares the entry. A frozen
-  entry is also blocked across reboots, by a marker in
-  `/var/lib/fleet-state/frozen` that its units assert absent.
-- **A move is undone exactly as far as it got.**
-  - Each undo is recorded before its step.
-  - The target's `drop` is recorded only after `place` succeeded.
-  - The source is frozen only if it stayed stopped since the stop
-    (`freeze --stopped`).
-- **The target never starts a moved service on empty state.** Its datasets
-  exist before it is deployed.
-- **Credentials handed over by `--via backup`:**
-  - only plain data reaches the target: settings as JSON, plain files;
-  - commands, hooks and rclone repositories are refused;
-  - they live only in the run's `0700` scratch directory in `/run`;
-  - rustic runs with no cache.
-
-### What the reviews already found
-
-Seven independent review passes ran on these commits and on infra's
-adoption, the last a fresh read of the whole of it.
-Every defect they reported was fixed and, where feasible, tested; the
-commit messages of `35ba05f`, `0908bd6`, `487cea7`, `5c7d10e` and the
-latest one (the last fixes) list them. The last pass judged the work ready to
-push; what it found (`drop` taking any undeclared location, undo needing
-the host that failed, frozen copies starting again after a reboot, and
-smaller ones) is fixed in that last commit. A fresh review is most useful where the earlier ones were weakest:
-- concurrency (two runs, a deploy or reboot in the middle);
-- systemd corner cases;
-- the move's undo paths.
-
-### Known limitations and untested paths
-
-These are accepted for now, but worth a second opinion:
-- **Through the admin's machine.** A streamed move passes through the
-  admin's machine and its uplink. For large `data` entries use
-  `--without-data` and `fleetl state copy` later.
-- **Target trust in `--via backup`.** The target's root could read and
-  change the source's repository (its backup history) while the restore
-  runs. With per-host Storage Box sub-accounts that is the source's whole
-  history.
-- **Transport on the target.** `--via backup` needs `ssh` and the box's
-  host key on the target, which hosts with backups have.
-- **Targets in the dependency walk.** A unit that needs a stopped entry's
-  unit only through a `.target` is not seen as held.
-- **Old backups' top directory.** Backups made before the `fleet-root` tag
-  (all of infra's so far) restore with the top directory's owner and mode
-  as they are on the host at the time.
-- **Setup and mounts.** A mount started by hand no longer pulls in
-  `fleet-state.service`; where that service failed (at boot), an entry's
-  mount fails alone until it is started again (`docs/state-mounts.md`).
-- **Agent forwarding.** `fleetl state` and `fleetl service move` run `sudo`
-  through pam_rssh with the agent forwarded. Root on that host can use the
-  agent meanwhile; `ssh-add -c` makes each use ask.
-- **Workstations.** Every host with btrfs or ZFS gets a small, inert
-  activation snippet, nixrc's workstations included.
-- **Not covered by a test:**
-  - a signal or a lost connection in the middle of a swap;
-  - `swap_recover` itself;
-  - a reboot between a move's stop and its freeze (`freeze --stopped`
-    refuses then; the reboot after the freeze is tested);
-  - a failing `--via backup` (wrong key, unknown host key);
-  - an unreachable host during a move's undo (the printed recovery
-    commands);
-  - the real Storage Box.
-  The drills above cover the last one.
-
-### Running a review with checks
-
-To check a claim, build exactly the commit, not the working tree:
-
-```
-git -C ~/Nix/ftl archive <rev> | tar -x -C /tmp/ftl-<rev>
-nix build --no-link --no-write-lock-file -L /tmp/ftl-<rev>/tests/unstable#checks.x86_64-linux.move
-```
-
-The shell scripts are packaged with `writeShellApplication`, so they run
-under `set -o errexit -o nounset -o pipefail` and are built through
-shellcheck. `fleet-state.sh` excludes SC2030 and SC2031 for its `scoped`
-subshells. When reading them, watch for functions called as conditions
-(`if f`, `f || …`), where bash turns errexit off for the whole call.
-
 ## Smartcards, AGENTS.md, ssh and Nix trust (2026-10-24)
 
-`567fb4f`, `smartcard: readers registered in the metadata, AGENTS.md
-generated from it`, and the milestones that follow it (see "Milestones"
-below). It also touches access, client and mkDeploy. Two sibling
+The commits `smartcard: registered readers only; AGENTS.md from the
+metadata` and `fleet: less to write downstream, consistent names, swap
+tests` (see "Milestones" below). It also touches access, client and mkDeploy. Two sibling
 repositories go with it:
 
 | Repository | Path | Branch | State |
@@ -477,62 +205,15 @@ repositories go with it:
 | Nix trust | `modules/nix.nix` | Flakes on, channels off, nobody but root trusted (`trustWheel = false`; a warning when `@wheel` slips in anyway). Unsigned closures go through `sudo nix-daemon` (`pushCommand` in `lib/agents.nix`: `nix copy --no-check-sigs --to 'ssh-ng://<host>?remote-program=sudo%20nix-daemon'`). |
 | `mkDeploy` | `lib/deploy.nix` | `sudoCopy` set when `sshUser` is not root; ignored by deploy-rs until its `sudoCopy` lands. |
 
-### Testing
-
-New checks, run like the others:
-
-| Check | Kind | Covers |
-|---|---|---|
-| `unit-smartcard` | evaluation | Registration (fleet-wide and per host, `fleetReaders = false`, bad ids refused), the udev rules, scdaemon, touch detector, the hand-over to a stubbed `piv-agent`, the warning without it. |
-| `unit-agents` | evaluation | The rendered AGENTS.md and a host's `/etc/AGENTS.md`; `fleet-agents` exists only once the repository has an AGENTS.md. |
-| `unit-fleet` | evaluation | The ssh blocks (with and without an alias), the fleet's caches, the Nix defaults and the `@wheel` warning, the repository as a git URL (`lib/repo.nix`). |
-| `agents` | build | The fixture's and the template's committed AGENTS.md are current; a stale one fails. |
-| `smartcard` | VM, 2 nodes | QEMU's emulated CCID reader (`usb-ccid`): the host that registered it sees it through pcscd, the other gets `PCSCLITE_IGNORE=1` and no reader. Also scdaemon and the touch detector. |
-| `push` | VM, 2 nodes | Nobody trusted: an admin's unsigned closure is refused; `sudo nix-daemon` without the forwarded agent is refused; with it the closure lands (no TTY needed); deploy-rs' `sudoCopy` URL (`ssh://…?remote-program=sudo -u root nix-store`) works; later copies find nothing to add. |
-
-The fixture's beta host now registers a headless reader and the web service
-announces a cache, so `unit-nixos` and `flake-full` cover them too.
-
-nix-piv and deploy-rs have their own tests; see nix-piv's `HUMAN.md`, and
-`nix build -L .#checks.x86_64-linux.sudo-copy` in deploy-rs.
-
-On real hardware, once a host registers a reader:
-- `udevadm info -q property -p /sys/bus/usb/devices/<port> | grep PCSCLITE_IGNORE`
-  shows `0` for the registered key and `1` for anything else;
-- `opensc-tool -l` lists only registered readers;
-- `gpg --card-status` still works (through pcscd), and `gpgconf --kill
-  scdaemon` frees the reader for PIV tools.
-
-### Where the risk is
-
-- **The udev filter.** On a host with a registered reader, every other CCID
-  reader becomes invisible to pcscd. That is the point, but a wrongly typed
-  vendor, product, serial or port hides the user's own key. YubiKeys report
-  no USB serial by default; register them by vendor and product, or `port`.
-- **`trustWheel = false`.** Pushing a laptop-built closure with plain
-  `nixos-rebuild --target-host` or deploy-rs fails on hosts that pick this
-  up. Push through `sudo nix-daemon` first, or set `fleet.nix.trustWheel =
-  true` on those hosts. Closures from the builder carry the cache signature
-  and are unaffected.
-- **`fleet-agents` and `fleet-sops` exist once their file does.** A fleet
-  that never ran `fleetl agents sync` (or `secrets sync`) has no such check;
-  once the file is committed, a stale one fails `nix flake check`.
-- **Agent forwarding to every fleet host.** Root on a target can use the
-  forwarded agent while the connection lasts; keys that need a touch limit
-  that. `fleet.access.sshConfig.forwardAgent = false` turns it off.
-- **The headless wiring** depends on nix-piv's option names (`accessGroup`,
-  `sharedSocket`, `socket`, `user`, `group`, `pinCredential`). It is
-  detected through `options`, so an older nix-piv without `accessGroup`
-  still evaluates, with the builder on the agent's own socket.
-
 ### Remaining steps
 
-1. **nixrc:** run `nix run .#fleetl -- agents sync` and commit `AGENTS.md`;
-   register the readers (fawkes, lovelace and hull attended, pavlov
-   headless with `fleetReaders = false`); move the forge's cache key into
-   `cache.publicKeys` of its service.nix; drop what ftl now does
-   (`nixos/modules/nix.nix`, scdaemon `disable-ccid`, the touch detector
-   in `profiles/hardware/smartcard.nix`).
+1. **nixrc:** AGENTS.md, the forge's cache and `nixos/modules/nix.nix`
+   are done on the `ftl-migration` branch (M5). Left: register the readers
+   (fawkes, lovelace and hull attended, pavlov headless with
+   `fleetReaders = false`) once their USB ids are known, then drop the
+   touch detector from `nixos/profiles/hardware/smartcard.nix` (ftl turns
+   it on for attended hosts); `disable-ccid` in
+   `home/profiles/desktop/gnupg.nix` repeats what ftl sets and may stay.
 2. **nix-piv in nixrc:** lock the published nix-piv, add
    `nix-piv.nixosModules.agent` to `nixos.sharedModules`.
 3. **deploy-rs:** commit `sudo-copy`, propose it upstream (it overlaps
@@ -542,9 +223,52 @@ On real hardware, once a host registers a reader:
 ### Milestones
 
 The review of 2026-10-25 (a survey of nixrc and infra, an audit of
-ftl) is being worked through in milestones, each one reviewed before the
-next. Each is one commit, named after its milestone.
+ftl) was worked through in milestones, each one reviewed before the
+next; M5 is what is left. M1 is part of the smartcard commit; M2 to M4 and their reviews are
+the commit after it.
 
 | Milestone | Content |
 |---|---|
 | M1: fixes before the push | `repo` as a flake reference no longer breaks `ftl-layers` (`lib/repo.nix`); the template no longer sets a follows on ftl, which has no inputs; `fleet-agents`/`fleet-sops` exist only once their file does; a warning when `@wheel` undoes `trustWheel = false`; the smartcard vocabulary shared (`lib/smartcard.nix`), caches in their own part (`lib/nixos/caches.nix`), `fleet.smartcard` no longer imports the builder; one push command (`pushCommand`); `unit-fleet` split off `unit-agents`, the `smartcard` VM test trimmed to the hardware. |
+| M2: less to write downstream | mkFlake imports the modules of known inputs that are paths (home-manager, sops-nix, disko; a path is imported once even when the fleet lists it too; comin's and lanzaboote's are functions and stay the fleet's), passes `inputs` to modules, renames registry entries (`exportInputs = { nixrc = "self"; }`), builds the `deploy` output and deploy-rs' checks from `deploy = { sshUser; … }`, and adds a dev shell with fleetl. Hosts get `networking.hostId` from their name, their uplink from a `network` block (`fleet.network`, infra's module generalized), initrd unlock (`fleet.access.initrd`), `shell`/`description` from `user.nix`, `fleet.access.localPasswords` for workstations; comin's remote defaults to the fleet's repository (`fleet.comin.branch`), the builder's cache key to its own `cache` entry; a `wireguard` generator. Not done: a registry of fixed uids (a generic option is no shorter than infra's helper, and setting `uid` on an undefined user creates a broken one). **Migration:** the reviews found what each consumer must change in the commit that bumps ftl; see "Migrating nixrc and infra" below. |
+| M2 review | `networking.hostId` at priority 999 (nixpkgs' installation profiles set one with mkDefault); `networking.domain` from the fqdn at 1200, below any fleet mkDefault; initrd unlock independent of the accounts, asserting an admin key, with DHCP in the initrd when there is no `network` block; `fleet.access.initrdPort` is `initrd.port` (rename error, migration script); the initrd uplink owned by fleet.network wherever the initrd brings up networking; the `network` block checked; deploy-rs' checks per system with that system's hosts only; the builder trusts every key its own cache announces; a known input whose module stops being a path is warned about; home-manager's module always imported with homes; the dev shell only where the fleet has none; `shell`/`description` reserved in user.nix; layers and client read the repository from fleet.meta (standalone too). |
+| M3: cleanup | One key-file reader (`lib/keys.nix`), one way to reach a host (`lib/address.nix`; mkDeploy now pins keys under the host's name as the ssh blocks and fleetl do), `peers` is `hostInfo` inside mkNixos; option names that matched their siblings (`fleet.layers.ntfy.url`, `fleet.builder.signing.gpgHome`, `fleet.builder.metrics.textfileDir`, `fleet.cache.dir`, `fleet.access.initrd.port`; neither nixrc nor infra set the old ones); the default fleet name is `fleet`; `notify` and `verify_commit` shared by ftl-layers and ftl-pipeline (`scripts/lib/common.sh`), the verify options and service sandboxing by builder and layers (`lib/units.nix`); `nixosModules` built from `modules/all.nix`; `ftl.lib.agents`; dead code gone (`fleet.backup.profiles`, fleet-state's `FLEET_STATE_CONF`/`FLEET_STATE_PROFILES`); docs drift fixed, testing and review moved from this file to `docs/testing.md` and `docs/review.md`; tests share the fixture's mkFlake arguments, and `checks.<sys>.fast` is everything but the VM tests. |
+| M4: risks | `tests/swap.nix`: a failed second rename during a swap is put back by `swap_recover`, and a TERM or HUP in the middle of a swap is held until the entry is whole (both checked against the intent of fleet-state; no script change). `fleetl check` evaluates each metadata file on its own and then the fleet, naming the file that breaks every output; every command that cannot evaluate the fleet points to it. |
+| M3/M4 review | `ftl-layers --help` prints its own header again (common.sh comes first in the packaged script); the `fast` set takes every check that is not a VM test (none can be forgotten); the access module's sshd policy sits above nixpkgs' mkDefaults (its installation profiles allow root, which made nixrc's installers fail once nixrc dropped its own mkForce); fleetl's hint about `fleetl check` only when the fleet itself fails; `NIX_CONFIG` in `lib/units.nix`; the test of `fleetl check` is `fleetl-check`; dangling "above" references after the split, and the docs' test rows, fixed. |
+| M5: nixrc and infra | nixrc: branch `ftl-migration` in the worktree `~/Nix/nixrc-ftl-migration` (off nixrc `master` 04216a6; four commits: defaults ftl provides dropped with `fleet.nix.trustWheel = true` and `fleet.access.localPasswords = true`, shell and description in `users/florian/user.nix`, the forge's cache announced in its `service.nix` and its pipeline on `master`, a generated AGENTS.md). Every host evaluates against this ftl; the closures differ from `master`'s only by the fleet cache (substituter, `ftl-status`) and AGENTS.md. Its `flake.lock` still names an old ftl: relocking it to the new ftl is the migration itself, so after the force-push `nix flake update ftl` on the branch, check, merge and push at once. No smartcard readers are registered: once one is, every other CCID device is ignored, so the YubiKey, Nitrokey, Ledger and Solo 2 need their ids first. infra: waits for infra to be pushed from the other workstation (674e33a and two lock bumps), then is done here on top of it as the commit that relocks ftl: `fleet.network` replacing infra's network.nix, a committed AGENTS.md (`fleetl agents sync`, or the `fleet-agents` check fails), the `trustWheel` default and the rest of "Migrating nixrc and infra", with infra's own checks. |
+
+### Migrating nixrc and infra
+
+What each consumer changes in the commit that moves it to this ftl (from the
+reviews of M2; the M5 milestone does it):
+
+- infra:
+  - delete `nixos/modules/network.nix` in the same commit, or the `10-wan`
+    lists (addresses, routes, nameservers, hosts entries) double: both merge,
+    nothing fails;
+  - `nixos/modules/unlock.nix`: drop the initrd sshd, network and shell (they
+    read `infra.network.initrd`, which is gone), keep clevis and `device`;
+    hosts set `fleet.access.initrd.enable = true` instead of
+    `infra.unlock.enable`;
+  - delete `defaults.nix`'s hostId and registry lines, the `wireguard`
+    generator (identical to ftl's), and in `flake.nix` `specialArgs.inputs`,
+    `sharedModules` (sops-nix, disko), the hand-built `deploy` and
+    `deployChecks`; `exportInputs = { nixrc = "self"; nixpkgs = "nixpkgs"; }`;
+  - `common.nix`: replace experimental-features and trusted-users with
+    `fleet.nix.trustWheel = true` (its deploy-rs has no sudoCopy yet);
+  - keep its own dev shell (it has more than ftl's).
+- nixrc:
+  - delete `nixos/modules/nix.nix` (`fleet.nix.trustWheel = true` instead),
+    hostPlatform in `defaults.nix` and the two aarch64 hosts, the sshd/rssh
+    lines of `defaults.nix`, its hostId lines, `florian.nix` (with
+    `shell = "zsh"; description = …;` in `users/florian/user.nix`);
+  - `defaults.nix`: `fleet.access.localPasswords = true` instead of
+    `mutableUsers`;
+  - `deploy.nix`: drop the repo URL, comin remotes and `fleet.layers.repo`,
+    set `fleet.comin.branch = "master"`; `forge.nix`'s `branch = "ftl"` is
+    stale, it should be `master`;
+  - announce the forge's cache in its `service.nix` (`cache.publicKeys`,
+    `port = 8080`); every other host then substitutes from it and gets
+    `ftl-status` (gc only with `fleet.client.gc.automatic`);
+  - smartcards: once readers are registered, every other CCID device is
+    ignored, so register the YubiKey, Nitrokey, Ledger and Solo 2, or none.

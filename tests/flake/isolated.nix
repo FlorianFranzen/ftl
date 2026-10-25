@@ -43,6 +43,7 @@ check "flake-isolated" (
       expected = [
         "apps"
         "checks"
+        "devShells"
         "fleet"
         "nixosConfigurations"
         "nixosLayers"

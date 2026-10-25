@@ -2,26 +2,16 @@
 {
   pkgs,
   ftl,
-  fixture,
-  inputs,
+  lib,
+  fixtureArgs,
   ...
 }:
 let
-  f = ftl.lib.mkFlake {
-    src = fixture;
-    inherit inputs;
-    name = "generators";
-    home = {
-      bases = {
-        terminal = [ "terminal" ];
-        desktop = [
-          "terminal"
-          "desktop"
-        ];
-      };
-      username = "alice";
-    };
-  };
+  f = ftl.lib.mkFlake (
+    lib.recursiveUpdate fixtureArgs {
+      name = "generators";
+    }
+  );
   programs = f.packages.x86_64-linux;
 
   check = name: files: ''
@@ -38,12 +28,18 @@ pkgs.runCommand "generators"
     nativeBuildInputs = [
       pkgs.ssh-to-age
       pkgs.openssl
+      pkgs.wireguard-tools
     ];
   }
   (
     check "host-keys" (builtins.attrNames f.fleet.generators.host-keys.files)
     + check "age-key" (builtins.attrNames f.fleet.generators.age-key.files)
     + check "token" (builtins.attrNames f.fleet.generators.token.files)
+    + check "wireguard" (builtins.attrNames f.fleet.generators.wireguard.files)
+    + ''
+      # the public key belongs to the private one
+      [ "$(wg pubkey < "$TMPDIR/wireguard/private")" = "$(cat "$TMPDIR/wireguard/wireguard.pub")" ]
+    ''
     + check "ca" (builtins.attrNames f.fleet.generators.ca.files)
     + ''
       # a generator with inputs reads them under $in/<generator>/<file>

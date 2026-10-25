@@ -54,6 +54,8 @@
 #   fleetl user init <name> [--admin] [--ssh-key <file>] [--pgp <fpr>] [--age <recipient>]
 #                                       new user folder from the agent's keys
 #   fleetl user show <name>
+#   fleetl check                        each host.nix, service.nix and user.nix on its
+#                                       own, then the fleet: which file is broken
 #
 # Everything is read through the flake (`nix eval .#fleet`), so new files must
 # be known to git (`git add`, intent-to-add is enough); init does that itself.
@@ -82,7 +84,40 @@ in_repo() {
 }
 
 fleet_json() { # <attr path below fleet>
-  nix eval --json ".#fleet.$1"
+  local out
+  if ! out="$(nix eval --json ".#fleet.$1" 2>"$tmp/eval.err")"; then
+    cat "$tmp/eval.err" >&2
+    # a missing attribute is the caller's to explain; anything else may be
+    # broken metadata, which fails every output
+    grep -q "does not provide attribute\|attribute '.*' missing" "$tmp/eval.err" ||
+      echo "fleetl: the fleet does not evaluate; \`fleetl check\` names the metadata file that breaks it" >&2
+    return 1
+  fi
+  printf '%s\n' "$out"
+}
+
+# --- check ---------------------------------------------------------------------
+
+# One broken host.nix, service.nix or user.nix fails every output, so the
+# commands above cannot help with it: each file is evaluated on its own
+# first, then the fleet as a whole (ftl's own checks of the metadata).
+check() {
+  in_repo
+  local f out failed=0
+  while IFS= read -r f; do
+    if ! out="$(nix-instantiate --eval --strict "$f" 2>&1 >/dev/null)"; then
+      echo "$f:" >&2
+      echo "  ${out//$'\n'/$'\n'  }" >&2
+      failed=1
+    fi
+  done < <(git ls-files 'nixos/hosts/*/host.nix' 'nixos/services/*/service.nix' 'users/*/user.nix')
+  [ "$failed" = 0 ] || die "these files do not evaluate on their own"
+  if ! out="$(nix eval --json .#fleet.hosts 2>&1 >/dev/null)"; then
+    # ftl's own messages name the host, service or user
+    grep -m1 -o 'ftl: .*' <<<"$out" >&2 || echo "$out" >&2
+    die "the metadata evaluates, but the fleet does not"
+  fi
+  echo "the fleet's metadata is fine"
 }
 
 # --- secrets -------------------------------------------------------------------
@@ -1129,6 +1164,7 @@ case "${1:-}" in
       *) usage ;;
     esac
     ;;
+  check) check ;;
   agents)
     case "${2:-}" in
       sync) shift 2; agents_sync "$@" ;;

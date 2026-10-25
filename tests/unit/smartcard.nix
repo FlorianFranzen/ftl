@@ -143,6 +143,18 @@ check "unit-smartcard" (
       };
     };
 
+    # a reader a module adds joins the registered ones instead of replacing them
+    testModuleReader = {
+      expr = builtins.attrNames
+        (mk {
+          hosts.desk.modules = [ { fleet.smartcard.readers.extra.vendor = "20a0"; } ];
+        }).nixosConfigurations.desk.config.fleet.smartcard.readers;
+      expected = [
+        "extra"
+        "yk"
+      ];
+    };
+
     testScdaemon = {
       expr = (cfg "desk").environment.etc."gnupg/scdaemon.conf".text;
       expected = ''

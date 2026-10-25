@@ -1,4 +1,4 @@
-# Host-side layers test: ftl-layers installs apps and services layers from a
+# Host-side layers test: ftl-layers installs packages and units layers from a
 # local repo, honours ftl-layers.json pins, refuses bad pins and unsigned
 # targets, keeps the old generation when a build fails, rolls back, and the
 # fleet.comin hook mirrors comin's generation into the system profile.
@@ -8,7 +8,6 @@
 {
   pkgs,
   ftl,
-  nixpkgs,
 }:
 let
   sh = "${pkgs.bash}/bin/bash";

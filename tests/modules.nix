@@ -4,29 +4,18 @@
   pkgs,
   lib,
   ftl,
-  fixture,
-  inputs,
+  fixtureArgs,
   ...
 }:
 let
-  f = ftl.lib.mkFlake {
-    src = fixture;
-    inherit inputs;
-    name = "modules";
-    nixos.extraProfiles.extra.only = {
-      environment.etc."extra-only".text = "extra";
-    };
-    home = {
-      bases = {
-        terminal = [ "terminal" ];
-        desktop = [
-          "terminal"
-          "desktop"
-        ];
+  f = ftl.lib.mkFlake (
+    lib.recursiveUpdate fixtureArgs {
+      name = "modules";
+      nixos.extraProfiles.extra.only = {
+        environment.etc."extra-only".text = "extra";
       };
-      username = "alice";
-    };
-  };
+    }
+  );
   alpha = f.nixosConfigurations.alpha.fleetArgs;
 in
 pkgs.testers.runNixOSTest {

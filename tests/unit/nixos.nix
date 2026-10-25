@@ -184,6 +184,7 @@ check "unit-nixos" (
           "host-keys"
           "host-tls"
           "token"
+          "wireguard"
         ];
         token = {
           "token.pub" = { };
@@ -201,6 +202,7 @@ check "unit-nixos" (
           host-keys = "host";
           host-tls = "host";
           token = "host";
+          wireguard = "host";
         };
         certInputs = [
           "ca/ca.pub"

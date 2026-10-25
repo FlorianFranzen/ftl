@@ -58,6 +58,7 @@ check "flake-full" (
       expected = [
         "apps"
         "checks"
+        "devShells"
         "fleet"
         "homeConfigurations"
         "homeModules"
@@ -208,6 +209,7 @@ check "flake-full" (
         "generate-host-keys"
         "generate-host-tls"
         "generate-token"
+        "generate-wireguard"
         "hello-ftl"
         "unfree-ftl"
       ];

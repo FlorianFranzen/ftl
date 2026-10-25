@@ -4,13 +4,16 @@
 #
 #   pkgs/    mkPackages  overlays.default, packages, legacyPackages
 #   nixos/   mkNixos     nixosConfigurations, nixosModules, nixosProfiles, nixosLayers,
-#                        nixosServices, fleet.hosts, fleet.services
+#                        nixosServices, fleet.hosts, fleet.services, fleet.keys,
+#                        fleet.caches, fleet.generators (and packages.generate-*)
 #   home/    mkHome      homeModules, homeProfiles, homeConfigurations
 #   static/  mkStatic    the `static` module argument (no outputs)
 #   users/   mkUsers     fleet.users, accounts on the hosts (through mkNixos)
 #
 # plus checks for all of them, `fleet.manifest`, consumed by the ftl pipeline,
-# and `fleet.agents`, the AGENTS.md of the repository (`fleetl agents sync`).
+# `fleet.agents`, the AGENTS.md of the repository (`fleetl agents sync`),
+# `fleet.sops` (the stores and their recipients), fleetl as a package and app,
+# a dev shell when the fleet has none, and `deploy` from the `deploy` argument.
 # Everything the library itself exports is below `fleet`.
 # Missing folders are skipped; folder names can be changed with
 # `layout.<family> = "dir"` (or null to disable). Unrecognized arguments are
@@ -18,7 +21,7 @@
 args@{
   src,
   inputs,
-  name ? "flake",
+  name ? "fleet",
   repo ? null,
   systems ? [
     "x86_64-linux"
@@ -29,8 +32,9 @@ args@{
   overlays ? [ ],
   # nixpkgs config; defaults to pkgs/config.nix
   config ? null,
-  # mkNixos options: specialArgs, sharedModules, extraProfiles, exportInputs,
-  # hosts, layers, services
+  # mkNixos options: specialArgs, sharedModules, extraProfiles, exportInputs
+  # (a list of inputs, or { <registry name> = "<input>"; }), inputModules (false:
+  # do not import sops-nix's and disko's modules), hosts, layers, services
   nixos ? { },
   # mkHome options: bases, variants, systems, sharedModules, extraSpecialArgs,
   # username
@@ -44,6 +48,11 @@ args@{
   smartcard ? { },
   # AGENTS.md: extra, strings or files appended to the generated one
   agents ? { },
+  # deploy-rs: mkDeploy's settings ({ sshUser?; user?; address?; sshOpts?;
+  # exclude?; sudoCopy?; }) make the `deploy` output and deploy-rs' checks,
+  # with the deploy-rs input (`deploy-rs` or `deploy`). A ready `deploy`
+  # output (with `nodes`) passes through as before.
+  deploy ? null,
   ...
 }:
 let
@@ -66,8 +75,63 @@ let
     "sops"
     "smartcard"
     "agents"
-  ];
+  ]
+  ++ lib.optional deploySettings "deploy";
   passthru = builtins.removeAttrs args knownArgs;
+
+  # --- deploy-rs ----------------------------------------------------------------
+  deployRs = inputs.deploy-rs or inputs.deploy or null;
+  deploySettings = builtins.isAttrs deploy && !(deploy ? nodes);
+  deployOut =
+    assert lib.assertMsg (
+      !deploySettings || deployRs != null
+    ) "ftl: mkFlake's `deploy` needs a deploy-rs input (`deploy-rs` or `deploy`)";
+    if deploySettings && nixosOut != null then
+      import ./deploy.nix (
+        {
+          inherit (nixosOut) nixosConfigurations;
+          hosts = nixosOut.fleet.hosts;
+          deploy = deployRs;
+          inherit lib;
+        }
+        // deploy
+      )
+    else
+      null;
+  # deploy-rs' activation check builds every node it is given: per system,
+  # only that system's hosts, so x86_64 checks need no aarch64 builder
+  deployChecks = lib.optionalAttrs (deployOut != null) (
+    lib.genAttrs systems (
+      system:
+      let
+        nodes = lib.filterAttrs (
+          n: _: nixosOut.nixosConfigurations.${n}.pkgs.stdenv.hostPlatform.system == system
+        ) deployOut.nodes;
+      in
+      lib.optionalAttrs (deployRs.lib ? ${system} && nodes != { }) (
+        deployRs.lib.${system}.deployChecks (deployOut // { inherit nodes; })
+      )
+    )
+  );
+
+  # --- modules of known inputs -----------------------------------------------------
+  # Imported into every host when the input exists. Only a module that is a path
+  # is imported this way: the module system imports a path once, also when the
+  # fleet lists it in sharedModules too. A function (lanzaboote's, comin's) would
+  # be imported twice, so those stay the fleet's to list.
+  userShared = nixos.sharedModules or [ ];
+  inputModule =
+    input: attr:
+    let
+      modules = inputs.${input}.nixosModules or { };
+      module = modules.${attr} or modules.default or null;
+      isPath = builtins.isPath module || (builtins.isString module && lib.hasPrefix "/nix/store/" module);
+    in
+    lib.optional ((nixos.inputModules or true) && module != null) (
+      lib.warnIf (!isPath)
+        "ftl: the ${input} input's NixOS module is no longer a path, so ftl does not import it (it could be imported twice); list it in nixos.sharedModules"
+        (if isPath then module else { })
+    );
 
   dirs = {
     pkgs = "pkgs";
@@ -170,14 +234,19 @@ let
         services = nixos.services or { };
         users = users';
         inherit smartcard;
-        specialArgs = nixos.specialArgs or { };
+        specialArgs = {
+          inherit inputs;
+        }
+        // (nixos.specialArgs or { });
         extraProfiles = nixos.extraProfiles or { };
         homes = if homeOut != null then homeOut.modules else { };
         homeCompanions = if homeOut != null then homeOut.companions else { };
         sharedModules =
+          # ftl's home wiring needs home-manager's module whatever inputModules says
           lib.optional (homeOut != null && homeManager != null) homeManager.nixosModules.home-manager
-          ++ lib.optional (inputs ? sops-nix) inputs.sops-nix.nixosModules.sops
-          ++ (nixos.sharedModules or [ ])
+          ++ inputModule "sops-nix" "sops"
+          ++ inputModule "disko" "disko"
+          ++ userShared
           ++ [ integration ];
       };
 
@@ -281,6 +350,7 @@ let
     (if nixosOut != null then nixosOut.checks else { })
     (if homeOut != null then lib.filterAttrs (_: c: c != { }) homeOut.checks else { })
     fleetChecks
+    deployChecks
   ];
 
   manifest = import ./manifest.nix {
@@ -345,6 +415,29 @@ let
         };
       });
     })
+    # what the admin works with, unless the fleet has a dev shell of its own
+    (lib.optionalAttrs (nixosOut != null && !(passthru ? devShells)) {
+      devShells = lib.genAttrs systems (
+        system:
+        let
+          pkgs = packages.pkgsFor system;
+        in
+        {
+          default = pkgs.mkShell {
+            packages = [
+              (fleetlFor system)
+              pkgs.sops
+              pkgs.ssh-to-age
+              pkgs.age
+            ]
+            ++ lib.optional (
+              deployRs != null && deployRs ? packages.${system}.default
+            ) deployRs.packages.${system}.default;
+          };
+        }
+      );
+    })
+    (lib.optionalAttrs (deployOut != null) { deploy = deployOut; })
     (lib.optionalAttrs (checks != { }) { inherit checks; })
     { fleet.manifest = manifest; }
     passthru

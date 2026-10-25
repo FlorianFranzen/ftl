@@ -15,7 +15,7 @@ in
   options.fleet.cache = {
     enable = lib.mkEnableOption "the ftl binary cache webserver";
 
-    cacheDir = lib.mkOption {
+    dir = lib.mkOption {
       type = lib.types.path;
       default = "${rootDir}/cache";
       defaultText = lib.literalExpression ''"''${config.fleet.rootDir}/cache"'';
@@ -63,7 +63,7 @@ in
           port = cfg.port;
         }) cfg.listenAddresses;
         locations."/cache/" = {
-          alias = "${cfg.cacheDir}/";
+          alias = "${cfg.dir}/";
           extraConfig = ''
             autoindex off;
           '';

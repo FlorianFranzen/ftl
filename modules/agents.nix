@@ -20,7 +20,7 @@ let
   head =
     if fleet != null && meta.host != null then
       render.host {
-        name = if meta.environment != null then meta.environment else "nixos";
+        name = if meta.environment != null then meta.environment else "fleet";
         inherit (meta) repo;
         inherit (fleet) hosts services users;
         caches = fleet.caches or [ ];

@@ -117,22 +117,8 @@ let
     host;
 in
 rec {
-  # A public key file's value: its first line that is not a comment (an SSH
-  # key, an age recipient), or, for a PEM file (a certificate), every PEM
-  # line, as the PEM text.  null for an empty file.
-  readKey =
-    path:
-    let
-      lines = lib.filter (l: l != "" && !lib.hasPrefix "#" l) (
-        map lib.trim (lib.splitString "\n" (builtins.readFile path))
-      );
-    in
-    if lines == [ ] then
-      null
-    else if lib.hasPrefix "-----BEGIN " (builtins.head lines) then
-      lib.concatMapStrings (l: l + "\n") lines
-    else
-      builtins.head lines;
+  # a public key file's value (lib/keys.nix)
+  inherit (import ../keys.nix { inherit lib; }) readKey;
 
   # specs: discovered, explicit ones merged over them (modules appended)
   hostSpecs =
@@ -153,7 +139,7 @@ rec {
   hosts' = builtins.mapAttrs normalize hostSpecs;
 
   # Every host's metadata, as seen by every host, itself included (`fleet.hosts`).
-  peers = builtins.mapAttrs (
+  hostInfo = builtins.mapAttrs (
     hostName: host:
     host.data
     // {

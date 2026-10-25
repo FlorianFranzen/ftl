@@ -14,11 +14,10 @@
 }:
 let
   cfg = config.fleet.layers;
+  units = import ../lib/units.nix { inherit lib; };
   scripts = import ./scripts.nix { inherit pkgs; };
   kinds = import ../lib/kinds.nix lib;
-  installed = lib.mapAttrs (
-    n: l: l // { kind = kinds.check "layer '${n}'" l.kind; }
-  ) cfg.installed;
+  installed = lib.mapAttrs (n: l: l // { kind = kinds.check "layer '${n}'" l.kind; }) cfg.installed;
 
   profileDir = "/nix/var/nix/profiles/layers";
 
@@ -36,8 +35,8 @@ let
     FTL_VERIFY_MODE = cfg.verify.mode;
     FTL_ALLOWED_SIGNERS =
       if cfg.verify.allowedSignersFile != null then toString cfg.verify.allowedSignersFile else null;
-    FTL_GPG_HOME = if cfg.verify.gpgHome != null then toString cfg.verify.gpgHome else null;
-    FTL_NTFY_URL = cfg.ntfyUrl;
+    FTL_VERIFY_GPG_HOME = if cfg.verify.gpgHome != null then toString cfg.verify.gpgHome else null;
+    FTL_NTFY_URL = cfg.ntfy.url;
   };
 
   # Host defaults baked in; explicitly set environment variables win.
@@ -75,7 +74,10 @@ let
   '';
 in
 {
-  imports = [ ./agents.nix ];
+  imports = [
+    ./meta.nix
+    ./agents.nix
+  ];
 
   options.fleet.layers = {
     installed = lib.mkOption {
@@ -93,9 +95,10 @@ in
 
     repo = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
-      default = null;
+      default = config.fleet.meta.repoUrl;
+      defaultText = lib.literalExpression "config.fleet.meta.repoUrl";
       example = "https://github.com/example/infra.git";
-      description = "Environment repository the layers are built from.";
+      description = "Git URL of the repository the layers are built from (by default the fleet's).";
     };
 
     stateDir = lib.mkOption {
@@ -122,34 +125,16 @@ in
       };
     };
 
-    ntfyUrl = lib.mkOption {
+    ntfy.url = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
       description = "ntfy topic URL for layer update failures.";
     };
 
-    verify = {
-      mode = lib.mkOption {
-        type = lib.types.enum [
-          "none"
-          "ssh"
-          "gpg"
-        ];
-        default = "none";
-        description = ''
-          Signature verification of the target commit. Under comin this is
-          redundant but cheap; it matters for manual and timer updates.
-        '';
-      };
-      allowedSignersFile = lib.mkOption {
-        type = lib.types.nullOr lib.types.path;
-        default = null;
-      };
-      gpgHome = lib.mkOption {
-        type = lib.types.nullOr lib.types.path;
-        default = null;
-      };
-    };
+    verify = units.verifyOptions ''
+      Signature verification of the target commit. Under comin this is
+      redundant but cheap; it matters for manual and timer updates.
+    '';
 
     hook = lib.mkOption {
       type = lib.types.str;
@@ -185,35 +170,23 @@ in
             pkgs.openssh
           ];
           environment = {
-            NIX_CONFIG = "experimental-features = nix-command flakes";
+            NIX_CONFIG = units.nixConfig;
             # Root would otherwise open /nix/store directly, which the
             # sandbox below makes read-only; the daemon does the writing.
             NIX_REMOTE = "daemon";
             # Fetcher and eval caches (/root is read-only under the sandbox).
             XDG_CACHE_HOME = "${cfg.stateDir}/cache";
           };
-          serviceConfig = {
+          serviceConfig = units.hardening // {
             Type = "oneshot";
             ExecStart = "${ftl-layers}/bin/ftl-layers update";
 
             # Runs as root (profiles under /nix/var and systemctl), so confine
             # it to what it needs: its state and the layer profiles.
-            NoNewPrivileges = true;
-            PrivateTmp = true;
-            ProtectSystem = "strict";
             ReadWritePaths = [
               cfg.stateDir
               profileDir
             ];
-            ProtectKernelTunables = true;
-            ProtectKernelModules = true;
-            ProtectKernelLogs = true;
-            ProtectControlGroups = true;
-            ProtectClock = true;
-            RestrictSUIDSGID = true;
-            RestrictRealtime = true;
-            LockPersonality = true;
-            SystemCallArchitectures = "native";
           };
         };
 

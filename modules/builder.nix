@@ -4,9 +4,15 @@
   lib,
   pkgs,
   ...
-}:
+}@args:
 let
   cfg = config.fleet.builder;
+  units = import ../lib/units.nix { inherit lib; };
+  fleet = args.fleet or null;
+  # the cache this host announces (`cache` in its host.nix or a service.nix)
+  ownCaches = lib.optionals (fleet != null) (
+    lib.filter (c: c.host == config.fleet.meta.host) (fleet.caches or [ ])
+  );
   rootDir = config.fleet.rootDir;
   scripts = import ./scripts.nix { inherit pkgs; };
 
@@ -69,7 +75,7 @@ in
       defaultText = lib.literalExpression ''"''${config.fleet.rootDir}/status"'';
       description = "Published status JSON (served by fleet.cache).";
     };
-    metricsDir = lib.mkOption {
+    metrics.textfileDir = lib.mkOption {
       type = lib.types.nullOr lib.types.path;
       default = null;
       description = "node_exporter textfile collector directory for pipeline metrics.";
@@ -123,41 +129,21 @@ in
         default = "ftl@localhost";
         description = "git author email for pipeline commits.";
       };
-      gnupgHome = lib.mkOption {
+      gpgHome = lib.mkOption {
         type = lib.types.nullOr lib.types.path;
         default = null;
         description = "GNUPGHOME holding the builder's (smartcard) signing key setup (openpgp format).";
       };
     };
 
-    verify = {
-      mode = lib.mkOption {
-        type = lib.types.enum [
-          "none"
-          "ssh"
-          "gpg"
-        ];
-        default = "none";
-        description = ''
-          Signature verification of the tip of each repo's branch before the
-          pipeline builds on it. Without it, anything that lands on the branch
-          is wrapped in a builder-signed commit and promoted, so host-side
-          signature checks only prove write access to the forge. The allowed
-          signers must include the builder's own signing key, since the
-          previous promotion is a builder commit.
-        '';
-      };
-      allowedSignersFile = lib.mkOption {
-        type = lib.types.nullOr lib.types.path;
-        default = null;
-        description = "OpenSSH allowed_signers file (ssh mode).";
-      };
-      gpgHome = lib.mkOption {
-        type = lib.types.nullOr lib.types.path;
-        default = null;
-        description = "GNUPGHOME whose keyring holds exactly the trusted public keys (gpg mode).";
-      };
-    };
+    verify = units.verifyOptions ''
+        Signature verification of the tip of each repo's branch before the
+        pipeline builds on it. Without it, anything that lands on the branch
+        is wrapped in a builder-signed commit and promoted, so host-side
+        signature checks only prove write access to the forge. The allowed
+        signers must include the builder's own signing key, since the
+        previous promotion is a builder commit.
+      '';
 
     knownHostsFile = lib.mkOption {
       type = lib.types.nullOr lib.types.path;
@@ -214,7 +200,8 @@ in
       };
       publicKey = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
-        default = null;
+        default = if ownCaches != [ ] then builtins.head (builtins.head ownCaches).publicKeys else null;
+        defaultText = lib.literalMD "the first key of the cache this host announces in the fleet's metadata, if any";
         description = "Matching public key; when set, this host substitutes from its own cache.";
       };
       signer.command = lib.mkOption {
@@ -373,14 +360,17 @@ in
       "d ${cfg.statusDir} 0755 ${cfg.user} ${cfg.group} -"
     ]
     ++ lib.optional (cfg.cache.dir != null) "d ${cfg.cache.dir} 0755 ${cfg.user} ${cfg.group} -"
-    ++ lib.optional (cfg.metricsDir != null) "d ${cfg.metricsDir} 0755 ${cfg.user} ${cfg.group} -";
+    ++ lib.optional (cfg.metrics.textfileDir != null) "d ${cfg.metrics.textfileDir} 0755 ${cfg.user} ${cfg.group} -";
 
     # Let the builder host substitute from its own cache, so aggressive GC of
     # the local store costs nothing.
     nix.settings = lib.mkMerge [
       (lib.mkIf (cfg.cache.dir != null && cfg.cache.publicKey != null) {
         extra-substituters = [ "file://${cfg.cache.dir}?priority=20" ];
-        extra-trusted-public-keys = [ cfg.cache.publicKey ];
+        # every key its own cache announces: paths may carry either signature
+        extra-trusted-public-keys = lib.unique (
+          [ cfg.cache.publicKey ] ++ lib.concatMap (c: c.publicKeys) ownCaches
+        );
       })
       # nix-daemon (root) signs at build time; the key never enters the
       # pipeline user's reach, where the flake it evaluates could read it.
@@ -432,11 +422,11 @@ in
               FTL_GIT_NAME = cfg.signing.name;
               FTL_GIT_EMAIL = cfg.signing.email;
               FTL_EVAL_WORKERS = toString cfg.evalWorkers;
-              NIX_CONFIG = "experimental-features = nix-command flakes";
+              NIX_CONFIG = units.nixConfig;
               HOME = cfg.stateDir;
             }
             // lib.optionalAttrs (cfg.signing.key != null) { FTL_SIGN_KEY = cfg.signing.key; }
-            // lib.optionalAttrs (cfg.signing.gnupgHome != null) { GNUPGHOME = cfg.signing.gnupgHome; }
+            // lib.optionalAttrs (cfg.signing.gpgHome != null) { GNUPGHOME = cfg.signing.gpgHome; }
             // lib.optionalAttrs (cfg.deployKeyFile != null) { FTL_DEPLOY_KEY = cfg.deployKeyFile; }
             // lib.optionalAttrs (cfg.cache.dir != null) { FTL_CACHE_DIR = cfg.cache.dir; }
             // lib.optionalAttrs (cfg.cache.secretKeyFile != null || cfg.cache.signer.command != null) {
@@ -457,14 +447,14 @@ in
             // lib.optionalAttrs (cfg.knownHostsFile != null) {
               FTL_KNOWN_HOSTS = toString cfg.knownHostsFile;
             }
-            // lib.optionalAttrs (cfg.metricsDir != null) {
-              FTL_METRICS_FILE = "${cfg.metricsDir}/ftl-${repoName}.prom";
+            // lib.optionalAttrs (cfg.metrics.textfileDir != null) {
+              FTL_METRICS_FILE = "${cfg.metrics.textfileDir}/ftl-${repoName}.prom";
             }
             // lib.optionalAttrs (cfg.ntfy.url != null) { FTL_NTFY_URL = cfg.ntfy.url; }
             // lib.optionalAttrs (repo.extraBuildArgs != "") {
               FTL_EXTRA_BUILD_ARGS = repo.extraBuildArgs;
             };
-            serviceConfig = {
+            serviceConfig = units.hardening // {
               Type = "oneshot";
               User = cfg.user;
               Group = cfg.group;
@@ -478,27 +468,15 @@ in
 
               # Sandboxing. Nix goes through the daemon socket, git and ssh
               # through the network; the only writable trees are ftl's own.
-              NoNewPrivileges = true;
-              PrivateTmp = true;
-              ProtectSystem = "strict";
               ProtectHome = true;
               ReadWritePaths = [
                 cfg.stateDir
                 cfg.statusDir
               ]
               ++ lib.optional (cfg.cache.dir != null) cfg.cache.dir
-              ++ lib.optional (cfg.metricsDir != null) cfg.metricsDir
-              ++ lib.optional (cfg.signing.gnupgHome != null) cfg.signing.gnupgHome;
-              ProtectKernelTunables = true;
-              ProtectKernelModules = true;
-              ProtectKernelLogs = true;
-              ProtectControlGroups = true;
-              ProtectClock = true;
+              ++ lib.optional (cfg.metrics.textfileDir != null) cfg.metrics.textfileDir
+              ++ lib.optional (cfg.signing.gpgHome != null) cfg.signing.gpgHome;
               ProtectHostname = true;
-              RestrictSUIDSGID = true;
-              RestrictRealtime = true;
-              LockPersonality = true;
-              SystemCallArchitectures = "native";
             };
           };
         }

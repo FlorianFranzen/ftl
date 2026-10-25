@@ -35,11 +35,7 @@ mkdir -p "$state" "$FTL_STATUS_DIR"
 
 log() { echo "ftl-pipeline[$FTL_REPO_NAME/$FTL_LANE]: $*" >&2; }
 
-notify() {
-  [ -n "${FTL_NTFY_URL:-}" ] || return 0
-  curl -fsS -m 10 -H "Title: ftl: $FTL_REPO_NAME/$FTL_LANE" -d "$1" "$FTL_NTFY_URL" >/dev/null ||
-    log "ntfy notification failed"
-}
+FTL_NTFY_TITLE="ftl: $FTL_REPO_NAME/$FTL_LANE"
 
 # ssh: never trust a host on first use (no tty means it would fail anyway,
 # but say so explicitly), optionally pin the repos' host keys to one file.
@@ -50,33 +46,6 @@ export GIT_SSH_COMMAND="$ssh_cmd"
 
 # Status pages are public: never publish credentials embedded in the repo URL.
 repo_public="$(sed -E 's#^([a-z+]+://)[^/@]*@#\1#' <<<"$FTL_REPO_URL")"
-
-verify_commit() { # sha -> 0 iff signed by a trusted key
-  local validity
-  case "$FTL_VERIFY_MODE" in
-  none) return 0 ;;
-  ssh)
-    validity="$(git -c gpg.format=ssh -c "gpg.ssh.allowedSignersFile=${FTL_ALLOWED_SIGNERS:?}" \
-      log -1 --format='%G?' "$1")"
-    ;;
-  gpg)
-    validity="$(GNUPGHOME="${FTL_VERIFY_GPG_HOME:?}" git -c gpg.format=openpgp log -1 --format='%G?' "$1")"
-    ;;
-  *)
-    log "unknown FTL_VERIFY_MODE '$FTL_VERIFY_MODE'"
-    return 1
-    ;;
-  esac
-  # ssh: only G = signed by a listed principal (U = valid but unlisted key).
-  # gpg: keyring holds only trusted keys, U only means "no ownertrust".
-  case "$FTL_VERIFY_MODE:$validity" in
-  *:G | gpg:U) return 0 ;;
-  *)
-    log "commit $1 has an invalid or untrusted signature (status=$validity)"
-    return 1
-    ;;
-  esac
-}
 
 # --- sync -------------------------------------------------------------------
 if [ ! -d "$mirror" ]; then

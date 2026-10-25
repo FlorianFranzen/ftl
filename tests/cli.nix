@@ -9,32 +9,22 @@
   pkgs,
   ftl,
   fixture,
-  inputs,
+  fixtureArgs,
   ...
 }:
 let
   lib = pkgs.lib;
-  f = ftl.lib.mkFlake {
-    src = fixture;
-    inherit inputs;
-    name = "cli";
-    home = {
-      bases = {
-        terminal = [ "terminal" ];
-        desktop = [
-          "terminal"
-          "desktop"
-        ];
-      };
-      username = "alice";
-    };
-    sops.extraRules = [
-      {
-        path_regex = "^tests/.*\\.yaml$";
-        key_groups = [ { age = [ "age1test" ]; } ];
-      }
-    ];
-  };
+  f = ftl.lib.mkFlake (
+    lib.recursiveUpdate fixtureArgs {
+      name = "cli";
+      sops.extraRules = [
+        {
+          path_regex = "^tests/.*\\.yaml$";
+          key_groups = [ { age = [ "age1test" ]; } ];
+        }
+      ];
+    }
+  );
 
   alice = builtins.head (
     lib.splitString "\n" (builtins.readFile (fixture + "/users/alice/sops.age"))

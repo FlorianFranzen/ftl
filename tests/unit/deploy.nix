@@ -62,10 +62,10 @@ check "unit-deploy" (
       expected = {
         hostname = "alpha.example.org";
         sshUser = "admin";
-        alias = "HostKeyAlias=alpha.example.org";
+        alias = "HostKeyAlias=alpha";
         strict = "StrictHostKeyChecking=yes";
         activatable = true;
-        known = "alpha.example.org ${n.fleet.hosts.alpha.keys.ssh}\n";
+        known = "alpha ${n.fleet.hosts.alpha.keys.ssh}\n";
       };
     };
 
@@ -78,7 +78,8 @@ check "unit-deploy" (
             inherit (n) nixosConfigurations;
             hosts = n.fleet.hosts;
             deploy = deploy-rs;
-          }) ? sudoCopy;
+          })
+            ? sudoCopy;
       };
       expected = {
         admin = true;

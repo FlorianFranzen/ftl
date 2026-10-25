@@ -14,7 +14,7 @@ let
     hosts'
     services'
     users'
-    peers
+    hostInfo
     ;
 
   recipientsOf =
@@ -23,7 +23,7 @@ let
       userNames ? [ ],
     }:
     let
-      hostKeys = map (h: peers.${h}.keys or { }) hostNames;
+      hostKeys = map (h: hostInfo.${h}.keys or { }) hostNames;
       userKeys = map (u: users'.${u}.keys) userNames;
       ofHosts = f: lib.concatMap f hostKeys;
     in

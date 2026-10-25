@@ -12,8 +12,10 @@
 #     sshUser = "admin";
 #   };
 #
-# A host's `fqdn` (free-form host data) is its address and known_hosts name
-# when present; `address` picks something else, e.g. `h: h.network.ipv4.address`.
+# A host's `fqdn` (free-form host data) is its address when present
+# (lib/address.nix); `address` picks something else, e.g.
+# `h: h.network.ipv4.address`. Its key is pinned under its name, as the ssh
+# blocks of fleet.access and fleetl pin it.
 #
 # The hosts' Nix daemons trust nobody but root (fleet.nix), so an `sshUser`
 # other than root copies the closure through sudo (`sudoCopy`, deploy-rs
@@ -25,7 +27,7 @@
   # the deploy-rs flake (for its activation scripts)
   deploy,
   # host data -> address to connect to
-  address ? (h: h.fqdn or h.name),
+  address ? (import ./address.nix { inherit lib; }).addressOf,
   # who logs in, and who owns the system profile
   sshUser ? "root",
   user ? "root",
@@ -39,12 +41,10 @@
 }:
 let
 
-  # Every host's SSH host key, under the name HostKeyAlias uses below.
+  # Every host's SSH host key, under its name (HostKeyAlias below).
   knownHosts = builtins.toFile "fleet-known-hosts" (
     lib.concatStrings (
-      lib.mapAttrsToList (
-        name: h: lib.optionalString (h ? keys.ssh) "${h.fqdn or name} ${h.keys.ssh}\n"
-      ) hosts
+      lib.mapAttrsToList (name: h: lib.optionalString (h ? keys.ssh) "${name} ${h.keys.ssh}\n") hosts
     )
   );
 
@@ -61,7 +61,7 @@ let
         sshOpts
         ++ lib.optionals (h ? keys.ssh) [
           "-o"
-          "HostKeyAlias=${h.fqdn or name}"
+          "HostKeyAlias=${name}"
           "-o"
           "UserKnownHostsFile=${knownHosts}"
           "-o"

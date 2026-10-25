@@ -12,15 +12,8 @@
 # listed. mkNixos resolves that; this only reads the folder.
 { src, lib }:
 let
-  # Non-empty, non-comment lines of a file, or none when it does not exist.
-  lines =
-    file:
-    if builtins.pathExists file then
-      lib.filter (l: l != "" && !lib.hasPrefix "#" l) (
-        map lib.trim (lib.splitString "\n" (builtins.readFile file))
-      )
-    else
-      [ ];
+  # the entries of a key file (lib/keys.nix)
+  inherit (import ./keys.nix { inherit lib; }) lines;
 
   user =
     userName: _:

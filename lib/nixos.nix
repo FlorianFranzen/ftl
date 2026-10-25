@@ -15,7 +15,9 @@
 #                             land next to host.nix, secret ones in its stores.
 #                             host.nix lists the generators a host uses
 #                             (`generators`, host-keys by default); `fleetl host
-#                             generate` runs them.
+#                             generate` runs them. `scope = "fleet"` makes one
+#                             for the whole fleet (files in nixos/), `inputs`
+#                             reads files of other generators.
 #   nixos/modules/**.nix      imported into every host (nixosModules)
 #   nixos/profiles/**.nix     opt-in modules, available as `profiles` argument
 #   nixos/layers/<name>.nix   layer definitions { kind; packages; units; }
@@ -29,7 +31,8 @@
 # gets ftl's own NixOS modules (all disabled by default) and the meta module.
 #
 # Every host also receives the `fleet` module argument: `fleet.hosts.<name> =
-# { name; system; importance; layers; } // <free-form data>` is all hosts'
+# { name; system; importance; layers; services; users; generators; smartcard;
+# keys; } // <free-form data>` is all hosts'
 # metadata, `fleet.self` the host's own entry. It is built from host.nix alone,
 # without evaluating any configuration, so modules can use it anywhere (even in
 # imports) without infinite recursion, e.g. to derive mesh endpoints, scrape
@@ -51,7 +54,7 @@
   # the repository root, for the paths in `sops` (defaults to the parent of src)
   root ? null,
   nixpkgs,
-  name ? "nixos",
+  name ? "fleet",
   repo ? null,
   # hosts.<name> = { system?; importance?; modules?; layers?; } (merged over
   # discovered hosts; modules are appended)
@@ -132,7 +135,7 @@ let
     hosts'
     services'
     users'
-    peers
+    hostInfo
     serviceInfo
     userInfo
     servicesOf
@@ -162,7 +165,7 @@ let
       config = {
         fleet.meta = {
           environment = name;
-          inherit repo;
+          inherit repo repoUrl;
           host = hostName;
           attr = hostName;
           inherit (host)
@@ -176,15 +179,25 @@ let
         fleet.layers.installed = lib.genAttrs host.layers (l: {
           kind = layerKind l;
         });
-        # git fetches these: a flake reference becomes its git URL
-        fleet.layers.repo = lib.mkIf (repo != null) (lib.mkDefault repoUrl);
-        fleet.client.repo = lib.mkIf (repo != null) (lib.mkDefault repoUrl);
+        # ZFS wants a hostId; one derived from the name is stable across
+        # installs. 999: above nixpkgs' own mkDefault (installation profiles)
+        networking.hostId = lib.mkOverride 999 (
+          builtins.substring 0 8 (builtins.hashString "md5" hostName)
+        );
+        # the domain from the fqdn, below any mkDefault of the fleet's own
+        networking.domain =
+          let
+            fqdn = hostInfo.${hostName}.fqdn or "";
+          in
+          lib.mkIf (lib.hasPrefix "${hostName}." fqdn) (
+            lib.mkOverride 1200 (lib.removePrefix "${hostName}." fqdn)
+          );
         fleet.secrets = {
           file = lib.mkIf (host.dir != null && builtins.pathExists (host.dir + "/secrets.yaml")) (
             host.dir + "/secrets.yaml"
           );
           ageKeyFile = lib.mkIf (
-            host.dir != null && peers.${hostName} ? keys.age
+            host.dir != null && hostInfo.${hostName} ? keys.age
           ) "/var/lib/sops-nix/key.txt";
           shared = lib.mkIf (src != null && builtins.pathExists (src + "/secrets.yaml")) (
             src + "/secrets.yaml"
@@ -192,7 +205,8 @@ let
         };
         fleet.smartcard = lib.mkIf (host.smartcard != null) {
           presence = lib.mkDefault host.smartcard.presence;
-          readers = lib.mkDefault host.smartcard.readers;
+          # each on its own, so a reader added by a module joins them
+          readers = lib.mapAttrs (_: lib.mkDefault) host.smartcard.readers;
         };
         fleet.agents.enable = lib.mkDefault true;
         fleet.nix.enable = lib.mkDefault true;
@@ -206,7 +220,7 @@ let
 
   # The fleet as every host sees it; `self` is added per host below.
   fleet = {
-    hosts = peers;
+    hosts = hostInfo;
     services = serviceInfo;
     users = userInfo;
     keys = fleetKeys;
@@ -234,7 +248,7 @@ let
       ++ [ (metaModule hostName host) ];
     specialArgs = specialArgs' // {
       fleet = fleet // {
-        self = peers.${hostName};
+        self = hostInfo.${hostName};
       };
     };
   }) hosts';

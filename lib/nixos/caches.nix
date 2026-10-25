@@ -1,13 +1,13 @@
 # Binary caches: a cache is announced as `cache = { publicKeys; url?; port?;
 # statusUrl?; }` in a host.nix (served by that host) or a service.nix (by each
 # of its hosts). `fleet.caches` lists them once per serving host; fleet.client
-# substitutes from them.
+# substitutes from them, and fleet.builder trusts its own entry's keys.
 ctx:
 let
   inherit (ctx)
     lib
     name
-    peers
+    hostInfo
     serviceInfo
     ;
 
@@ -15,7 +15,9 @@ let
   cacheOn =
     where: hostName: c:
     let
-      base = "http://${peers.${hostName}.fqdn or hostName}:${toString (c.port or 8080)}";
+      base = "http://${
+        (import ../address.nix { inherit lib; }).addressOf hostInfo.${hostName}
+      }:${toString (c.port or 8080)}";
     in
     assert lib.assertMsg (
       builtins.isList (c.publicKeys or null) && c.publicKeys != [ ]
@@ -31,7 +33,7 @@ in
 {
   caches =
     lib.concatLists (
-      lib.mapAttrsToList (h: p: lib.optional (p ? cache) (cacheOn "host '${h}'" h p.cache)) peers
+      lib.mapAttrsToList (h: p: lib.optional (p ? cache) (cacheOn "host '${h}'" h p.cache)) hostInfo
     )
     ++ lib.concatLists (
       lib.mapAttrsToList (

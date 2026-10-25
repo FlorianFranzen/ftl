@@ -155,14 +155,6 @@ in
         `fleet_backup_snapshots{kind}`.
       '';
     };
-
-    profiles = lib.mkOption {
-      type = lib.types.attrsOf toml.type;
-      readOnly = true;
-      default = if cfg.enable then profiles else { };
-      defaultText = lib.literalMD "the rustic profile of each kind";
-      description = "The rustic profiles, /etc/rustic/<kind>.toml (for `fleetl`).";
-    };
   };
 
   config = lib.mkIf (cfg.enable && entries != { }) {

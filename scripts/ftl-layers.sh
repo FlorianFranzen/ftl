@@ -11,7 +11,7 @@
 #   FTL_REPO_URL  FTL_SYSTEM  FTL_LAYERS ("name:kind ...")
 #   FTL_STATE_DIR (/var/lib/ftl-layers)  FTL_PROFILE_DIR (/nix/var/nix/profiles/layers)
 #   FTL_KEEP_GENERATIONS  FTL_VERIFY_MODE (none|ssh|gpg)  FTL_ALLOWED_SIGNERS
-#   FTL_GPG_HOME  FTL_NTFY_URL
+#   FTL_VERIFY_GPG_HOME  FTL_NTFY_URL
 #
 # A layer's revision comes from ftl-layers.json at the target commit:
 #   { "<layer>": "latest" | "<sha>" }   (missing entry = "latest")
@@ -29,11 +29,7 @@ target_file="$FTL_STATE_DIR/target"
 
 log() { echo "ftl-layers: $*" >&2; }
 
-notify() {
-  [ -n "${FTL_NTFY_URL:-}" ] || return 0
-  curl -fsS -m 10 -H "Title: ftl-layers: $(hostname)" -d "$1" "$FTL_NTFY_URL" >/dev/null ||
-    log "ntfy notification failed"
-}
+FTL_NTFY_TITLE="ftl-layers: $(hostname)"
 
 is_units() { [ "$1" = units ]; }
 
@@ -51,29 +47,6 @@ ensure_mirror() {
   mkdir -p "$FTL_STATE_DIR" "$FTL_PROFILE_DIR"
   [ -d "$mirror" ] || git init --quiet --bare "$mirror"
   g fetch --quiet "${FTL_REPO_URL:?}" '+refs/heads/*:refs/remotes/origin/*'
-}
-
-verify_commit() { # sha
-  local fmt=() validity
-  case "$FTL_VERIFY_MODE" in
-  none) return 0 ;;
-  ssh) fmt=(-c gpg.format=ssh -c "gpg.ssh.allowedSignersFile=${FTL_ALLOWED_SIGNERS:?}") ;;
-  gpg) export GNUPGHOME="${FTL_GPG_HOME:?}" ;;
-  *)
-    log "unknown FTL_VERIFY_MODE '$FTL_VERIFY_MODE'"
-    return 1
-    ;;
-  esac
-  validity="$(g "${fmt[@]}" log -1 --format='%G?' "$1")"
-  # ssh: only G = signed by a listed principal (U = valid but unlisted key).
-  # gpg: keyring holds only trusted keys, U only means "no ownertrust".
-  case "$FTL_VERIFY_MODE:$validity" in
-  *:G | gpg:U) return 0 ;;
-  *)
-    log "commit $1 has an invalid or untrusted signature (status=$validity)"
-    return 1
-    ;;
-  esac
 }
 
 meta_units() { # profile path -> unit names
@@ -103,7 +76,7 @@ cmd_update() {
     log "target $sha not found in $FTL_REPO_URL"
     return 1
   }
-  verify_commit "$sha" || return 1
+  verify_commit "$sha" g || return 1
   echo "$sha" >"$target_file"
   [ -f "$state" ] || echo '{}' >"$state"
   jq --arg sha "$sha" '.target = $sha' "$state" >"$state.tmp" && mv "$state.tmp" "$state"
@@ -232,7 +205,9 @@ rollback)
   cmd_rollback "$@"
   ;;
 *)
-  grep '^#' "$0" | sed -n '2,10p' | sed 's/^# \{0,1\}//'
+  # the header from "# ftl-layers:" to the environment (scripts/lib/common.sh
+  # comes first in the packaged script)
+  sed -n '/^# ftl-layers:/,/^# Environment/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
   exit 2
   ;;
 esac

@@ -75,7 +75,11 @@ in
     gc = {
       automatic = lib.mkOption {
         type = lib.types.bool;
-        default = true;
+        default = false;
+        description = ''
+          Collect garbage on a schedule. Off unless set: it deletes old system
+          generations, and with them rollback targets.
+        '';
       };
       dates = lib.mkOption {
         type = lib.types.str;
@@ -89,8 +93,9 @@ in
 
     repo = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
-      default = null;
-      description = "Environment repository URL (ftl-status fallback when the status page is unreachable).";
+      default = config.fleet.meta.repoUrl;
+      defaultText = lib.literalExpression "config.fleet.meta.repoUrl";
+      description = "Git URL of the fleet's repository (ftl-status fallback when the status page is unreachable).";
     };
 
     statusUrl = lib.mkOption {

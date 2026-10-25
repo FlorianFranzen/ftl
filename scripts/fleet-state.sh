@@ -62,10 +62,10 @@
 # entry's name, recorded for this host, and tagged fleet-entry:<entry> and
 # fleet-service:<service>.  Copies kept aside are <dataset or subvolume>.aside-<time>.
 
-conf="${FLEET_STATE_CONF:-/etc/fleet-state}"
+conf=/etc/fleet-state
 state_json="$conf/state.json"
 backup_json="$conf/backup.json"
-profiles="${FLEET_STATE_PROFILES:-/etc/rustic}"
+profiles=/etc/rustic
 # what stop stopped and blocked, for start (gone with a reboot, as the blocks
 # are: drop-ins in /run, which NixOS's units in /etc cannot override, unlike
 # runtime masks)

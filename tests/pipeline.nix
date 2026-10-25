@@ -3,7 +3,6 @@
 {
   pkgs,
   ftl,
-  nixpkgs,
 }:
 pkgs.testers.runNixOSTest {
   name = "ftl-pipeline";
@@ -33,7 +32,9 @@ pkgs.testers.runNixOSTest {
 
       # The sandboxed pipeline unit pushes to a local bare repo here (real
       # deployments push over the network).
-      systemd.services.ftl-pipeline-fixture-default.serviceConfig.ReadWritePaths = [ "/var/lib/origin.git" ];
+      systemd.services.ftl-pipeline-fixture-default.serviceConfig.ReadWritePaths = [
+        "/var/lib/origin.git"
+      ];
 
       fleet.builder = {
         enable = true;

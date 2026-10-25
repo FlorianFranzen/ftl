@@ -25,10 +25,11 @@ in
         self.shortRev or self.dirtyShortRev
       );
 
-      # Make the flake's inputs available to nix commands on the host
-      nix.registry = lib.genAttrs exportInputs (name: {
-        flake = inputs.${name};
-      });
+      # Make the flake's inputs available to nix commands on the host, by their
+      # own names or (exportInputs = { <registry name> = "<input>"; }) others
+      nix.registry = lib.mapAttrs (_: input: { flake = inputs.${input}; }) (
+        if builtins.isAttrs exportInputs then exportInputs else lib.genAttrs exportInputs (n: n)
+      );
     }
 
     (lib.mkIf (inputs ? nixpkgs) {

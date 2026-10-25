@@ -23,6 +23,8 @@ let
     "home"
     "uid"
     "groups"
+    "shell"
+    "description"
     "keys"
     "dir"
   ];
@@ -41,6 +43,9 @@ let
         home = spec.home or null;
         uid = spec.uid or null;
         groups = spec.groups or [ ];
+        # the account's login shell (a package name) and full name
+        shell = spec.shell or null;
+        description = spec.description or null;
         keys = {
           ssh = [ ];
           pgp = [ ];
@@ -107,6 +112,8 @@ rec {
         home
         uid
         groups
+        shell
+        description
         keys
         ;
     }

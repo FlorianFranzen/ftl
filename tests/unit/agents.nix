@@ -56,6 +56,22 @@ check "unit-agents" (
       };
     };
 
+    # credentials in the repository's URL stay out of the file
+    testRepoCredentials = {
+      expr =
+        let
+          t = (ftl.lib.mkFlake (fixtureArgs // { repo = "https://ci:s3cret@git.example.org/fleet"; })).fleet.agents;
+        in
+        {
+          token = has "s3cret" t;
+          url = has "(`https://git.example.org/fleet`)" t;
+        };
+      expected = {
+        token = false;
+        url = true;
+      };
+    };
+
     # each host carries its own part, and what its configuration adds
     testHostText = {
       expr = {

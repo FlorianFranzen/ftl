@@ -34,6 +34,7 @@ let
     age-key = ../generators/age-key.nix;
     fleet-ca = ../generators/fleet-ca.nix;
     host-tls = ../generators/host-tls.nix;
+    wireguard = ../generators/wireguard.nix;
   }
   // loader.loadTreeIfExists { dir = dir "generators"; };
 

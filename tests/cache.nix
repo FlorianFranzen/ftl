@@ -5,7 +5,6 @@
 {
   pkgs,
   ftl,
-  nixpkgs,
 }:
 let
   publicKey = pkgs.lib.fileContents ./fixtures/keys/cache-test.public;
@@ -26,7 +25,7 @@ pkgs.testers.runNixOSTest {
         };
         fleet.cache = {
           enable = true;
-          cacheDir = "/var/lib/cache";
+          dir = "/var/lib/cache";
           statusDir = "/var/lib/status";
           openFirewall = true;
         };

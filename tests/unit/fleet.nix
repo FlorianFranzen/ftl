@@ -5,11 +5,77 @@
   lib,
   ftl,
   nixpkgs,
+  comin,
   fixtureArgs,
   check,
   ...
 }:
 let
+  key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHW437gdXlD8N84nBJqtbi36N1kia4RepapKRaxqlor6 alice";
+  # a fleet of its own: a host with a `network` block and initrd unlock, a
+  # workstation keeping local passwords, an admin with a shell
+  mini = ftl.lib.mkNixos {
+    inherit nixpkgs;
+    repo = "github:example/fleet";
+    hosts = {
+      net = {
+        network = {
+          mac = "52:54:00:12:34:56";
+          ipv4 = {
+            address = "192.0.2.10";
+            prefixLength = 24;
+            gateway = "192.0.2.1";
+          };
+          ipv6 = {
+            address = "2001:db8::10";
+            prefixLength = 64;
+            gateway = "2001:db8::1";
+          };
+          nameservers = [ "192.0.2.53" ];
+        };
+        modules = [ { fleet.access.initrd.enable = true; } ];
+      };
+      # IPv4 only, found by name, its IPv6 address from a delegated prefix
+      deleg = {
+        fqdn = "deleg.example.org";
+        network = {
+          interface = "ens3";
+          ipv4 = {
+            address = "192.0.2.20";
+            prefixLength = 32;
+            gateway = "192.0.2.1";
+          };
+          ipv6 = {
+            address = "2001:db8:1::1";
+            prefixLength = 56;
+            delegatedPrefix = "2001:db8:1::/56";
+          };
+        };
+      };
+      v4only.network = {
+        interface = "eth0";
+        ipv4 = {
+          address = "192.0.2.30";
+          prefixLength = 24;
+          gateway = "192.0.2.1";
+        };
+      };
+      # a workstation: local passwords, initrd unlock over DHCP
+      ws.modules = [
+        {
+          fleet.access.localPasswords = true;
+          fleet.access.initrd.enable = true;
+        }
+      ];
+    };
+    users.alice = {
+      admin = true;
+      keys.ssh = [ key ];
+      shell = "zsh";
+      description = "Alice";
+    };
+  };
+  m = host: mini.nixosConfigurations.${host}.config;
   f = ftl.lib.mkFlake (fixtureArgs // { repo = "github:example/fleet"; });
   has = lib.hasInfix;
   cfg = host: f.nixosConfigurations.${host}.config;
@@ -23,7 +89,7 @@ check "unit-fleet" (
         alpha = has ''
           Host alpha alpha.example.org
             HostName alpha.example.org
-            ForwardAgent yes
+            ForwardAgent no
             ControlMaster auto
             ControlPath ~/.ssh/cm-%C
             ControlPersist 10m
@@ -36,11 +102,20 @@ check "unit-fleet" (
         '' (cfg "gamma").programs.ssh.extraConfig;
         gamma = has "Host gamma\n  HostName gamma\n" (cfg "alpha").programs.ssh.extraConfig;
         noUnlock = has "gamma-unlock" (cfg "alpha").programs.ssh.extraConfig;
+        # the agent for the host's accounts only, by the names given
+        forward = has ''
+          Match originalhost alpha,alpha.example.org,beta,gamma localuser alice
+            ForwardAgent yes
+        '' (cfg "gamma").programs.ssh.extraConfig;
+        # nothing after the blocks lands in the last of them
+        reset = lib.hasSuffix "Match all\n" (cfg "gamma").programs.ssh.extraConfig;
       };
       expected = {
         alpha = true;
         gamma = true;
         noUnlock = false;
+        forward = true;
+        reset = true;
       };
     };
 
@@ -126,6 +201,172 @@ check "unit-fleet" (
         slipped = true;
         clean = false;
       };
+    };
+
+    # the uplink from the host's `network` block, the same for the initrd
+    testNetwork = {
+      expr = {
+        inherit ((m "net").systemd.network.networks."10-wan") address matchConfig;
+        nameservers = (m "net").networking.nameservers;
+        networkd = (m "net").networking.useNetworkd;
+        initrd = (m "net").boot.initrd.systemd.network.networks."10-wan".address;
+        hosts = (m "net").networking.hosts."192.0.2.10";
+        # no block, no networking from ftl
+        ws = (m "ws").fleet.network.enable;
+        deleg = {
+          inherit ((m "deleg").systemd.network.networks."10-wan")
+            address
+            matchConfig
+            networkConfig
+            dhcpV6Config
+            ;
+          hosts = (m "deleg").networking.hosts."2001:db8:1::1";
+        };
+        v4only = {
+          inherit ((m "v4only").systemd.network.networks."10-wan") address networkConfig;
+          routes = map (r: r.Gateway) (m "v4only").systemd.network.networks."10-wan".routes;
+        };
+      };
+      expected = {
+        address = [
+          "192.0.2.10/24"
+          "2001:db8::10/64"
+        ];
+        matchConfig.MACAddress = "52:54:00:12:34:56";
+        nameservers = [ "192.0.2.53" ];
+        networkd = true;
+        initrd = [ "192.0.2.10/24" ];
+        hosts = [ "net" ];
+        ws = false;
+        deleg = {
+          address = [
+            "192.0.2.20/32"
+            "2001:db8:1::1/128"
+          ];
+          matchConfig.Name = "ens3";
+          networkConfig = {
+            DHCP = "ipv6";
+            IPv6AcceptRA = true;
+          };
+          dhcpV6Config = {
+            PrefixDelegationHint = "2001:db8:1::/56";
+            WithoutRA = "solicit";
+            UseAddress = false;
+            UseDNS = false;
+          };
+          hosts = [
+            "deleg.example.org"
+            "deleg"
+          ];
+        };
+        v4only = {
+          address = [ "192.0.2.30/24" ];
+          networkConfig = {
+            DHCP = "no";
+            IPv6AcceptRA = true;
+          };
+          routes = [ "192.0.2.1" ];
+        };
+      };
+    };
+
+    # initrd sshd with the initrd key, the admins' keys, the password agent
+    testInitrd = {
+      expr = {
+        inherit ((m "net").boot.initrd.network.ssh) port hostKeys authorizedKeys;
+        shell = (m "net").boot.initrd.systemd.users.root.shell;
+        # no `network` block: DHCP in the initrd
+        ws = (m "ws").boot.initrd.systemd.network.networks."99-dhcp".networkConfig.DHCP;
+        noAdmins =
+          let
+            c =
+              (ftl.lib.mkNixos {
+                inherit nixpkgs;
+                hosts.h.modules = [ { fleet.access.initrd.enable = true; } ];
+              }).nixosConfigurations.h.config;
+          in
+          lib.any (a: !a.assertion && lib.hasInfix "nobody could unlock" a.message) c.assertions;
+      };
+      expected = {
+        port = 2222;
+        hostKeys = [ "/etc/secrets/initrd/ssh_host_ed25519_key" ];
+        authorizedKeys = [ key ];
+        shell = "/bin/systemd-tty-ask-password-agent";
+        ws = "yes";
+        noAdmins = true;
+      };
+    };
+
+    # shell and description from user.nix; local passwords where asked for
+    testAccounts = {
+      expr = {
+        shell = lib.getName (m "net").users.users.alice.shell;
+        inherit ((m "net").users.users.alice) description;
+        zsh = (m "net").programs.zsh.enable;
+        mutable = {
+          net = (m "net").users.mutableUsers;
+          ws = (m "ws").users.mutableUsers;
+        };
+      };
+      expected = {
+        shell = "zsh";
+        description = "Alice";
+        zsh = true;
+        mutable = {
+          net = false;
+          ws = true;
+        };
+      };
+    };
+
+    testHostIdAndDomain = {
+      expr = {
+        hostId = (m "net").networking.hostId;
+        domain = (m "deleg").networking.domain;
+        noFqdn = (m "net").networking.domain;
+      };
+      expected = {
+        # md5("net")
+        hostId = "40fa73c9";
+        domain = "example.org";
+        noFqdn = null;
+      };
+    };
+
+    # the builder trusts its own cache with the key its metadata announces
+    testBuilderKey = {
+      expr = (cfg "alpha").fleet.builder.cache.publicKey;
+      expected = "ftl-test-1:6CA2VCkcTQDS8JL6HcoXOOHZWCqjV+3baLKM86c7dcw=";
+    };
+
+    # comin follows the fleet's repository, at fleet.comin.branch
+    testCominRemote = {
+      expr =
+        let
+          c =
+            (ftl.lib.mkNixos {
+              inherit nixpkgs;
+              repo = "github:example/fleet";
+              sharedModules = [ comin.nixosModules.comin ];
+              hosts.h.modules = [
+                {
+                  services.comin.enable = true;
+                  fleet.comin.branch = "master";
+                }
+              ];
+            }).nixosConfigurations.h.config;
+        in
+        map (r: {
+          inherit (r) name url;
+          branch = r.branches.main.name;
+        }) c.services.comin.remotes;
+      expected = [
+        {
+          name = "origin";
+          url = "https://github.com/example/fleet.git";
+          branch = "master";
+        }
+      ];
     };
 
     # git fetches the repository: a flake reference becomes its git URL

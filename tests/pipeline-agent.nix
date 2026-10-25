@@ -5,7 +5,6 @@
 {
   pkgs,
   ftl,
-  nixpkgs,
 }:
 let
   keys = import (pkgs.path + "/nixos/tests/ssh-keys.nix") pkgs;
@@ -42,7 +41,12 @@ pkgs.testers.runNixOSTest {
       # The environment repo lives behind sshd, as on GitHub
       services.openssh = {
         enable = true;
-        hostKeys = [ { path = "/etc/ssh/ssh_host_ed25519_key"; type = "ed25519"; } ];
+        hostKeys = [
+          {
+            path = "/etc/ssh/ssh_host_ed25519_key";
+            type = "ed25519";
+          }
+        ];
       };
       environment.etc."ssh/ssh_host_ed25519_key" = {
         source = keys.snakeOilEd25519PrivateKey;

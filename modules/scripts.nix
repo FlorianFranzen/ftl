@@ -27,7 +27,7 @@ rec {
       coreutils
       ftl-cache-retention
     ];
-    text = builtins.readFile ../scripts/ftl-pipeline.sh;
+    text = builtins.readFile ../scripts/lib/common.sh + builtins.readFile ../scripts/ftl-pipeline.sh;
   };
 
   ftl-layers = pkgs.writeShellApplication {
@@ -44,7 +44,7 @@ rec {
       inetutils # hostname
       systemd
     ];
-    text = builtins.readFile ../scripts/ftl-layers.sh;
+    text = builtins.readFile ../scripts/lib/common.sh + builtins.readFile ../scripts/ftl-layers.sh;
   };
 
   # The admin's command line: fleetl, and ftl as its alias.

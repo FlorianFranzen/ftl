@@ -11,6 +11,7 @@
   ./access.nix
   ./secrets.nix
   ./smartcard.nix
+  ./network.nix
   ./agents.nix
   ./nix.nix
 ]

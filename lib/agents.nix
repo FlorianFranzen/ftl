@@ -167,7 +167,14 @@ let
       ]
     );
 
-  repoText = repo: optionalString (repo != null) " (`${repo}`)";
+  # without credentials (user:password@), which the file must not carry
+  publicRepo =
+    repo:
+    let
+      m = builtins.match "([a-z+]+://)?([^/@]*:[^/@]*@)?(.*)" repo;
+    in
+    (if builtins.elemAt m 0 == null then "" else builtins.elemAt m 0) + builtins.elemAt m 2;
+  repoText = repo: optionalString (repo != null) " (`${publicRepo repo}`)";
 in
 {
   inherit rules pushCommand;

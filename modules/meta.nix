@@ -15,7 +15,8 @@ in
 {
   options.fleet.meta = {
     environment = opt str "The fleet's name (mkFlake's `name`).";
-    repo = opt str "The fleet's repository (mkFlake's `repo`).";
+    repo = opt str "The fleet's repository (mkFlake's `repo`, as given).";
+    repoUrl = opt str "The fleet's repository as a git URL (what git fetches: layers, status, comin).";
     host = opt str "This host's name (the directory under nixos/hosts); null outside mkNixos.";
     attr = opt str "The attribute of this configuration in nixosConfigurations.";
     importance = opt str "required, optional or ignored for the pipeline.";

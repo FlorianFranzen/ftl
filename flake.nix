@@ -2,7 +2,8 @@
   description = "ftl - fleet template library: fleet outputs, update pipeline and binary cache for NixOS";
 
   # The library is pure and needs no inputs.  The test suite lives in two
-  # flakes with their own inputs (nixpkgs, home-manager, sops-nix) and this
+  # flakes with their own inputs (nixpkgs, home-manager, sops-nix, comin,
+  # deploy-rs) and this
   # flake as a relative input: `nix flake check ./tests/stable` or
   # `./tests/unstable`.
   inputs = { };
@@ -12,21 +13,21 @@
     {
       lib = import ./lib;
 
-      nixosModules = {
-        builder = ./modules/builder.nix;
-        cache = ./modules/cache.nix;
-        client = ./modules/client.nix;
-        layers = ./modules/layers.nix;
-        comin = ./modules/comin.nix;
-        state = ./modules/state.nix;
-        backup = ./modules/backup.nix;
-        access = ./modules/access.nix;
-        secrets = ./modules/secrets.nix;
-        smartcard = ./modules/smartcard.nix;
-        agents = ./modules/agents.nix;
-        nix = ./modules/nix.nix;
-        default.imports = import ./modules/all.nix;
-      };
+      # each module of modules/all.nix by its name, and all of them as default
+      nixosModules =
+        let
+          all = import ./modules/all.nix;
+          name = path: builtins.replaceStrings [ ".nix" ] [ "" ] (baseNameOf (toString path));
+        in
+        builtins.listToAttrs (
+          map (path: {
+            name = name path;
+            value = path;
+          }) all
+        )
+        // {
+          default.imports = all;
+        };
 
       templates.minimal = {
         path = ./templates/minimal;

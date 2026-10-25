@@ -83,6 +83,16 @@ in
       '';
     };
 
+    branch = lib.mkOption {
+      type = lib.types.str;
+      default = "main";
+      example = "master";
+      description = ''
+        The deployed branch: comin's remote `origin` defaults to the fleet's
+        repository (fleet.meta.repoUrl) at this branch.
+      '';
+    };
+
     hook = lib.mkOption {
       type = lib.types.path;
       readOnly = true;
@@ -94,6 +104,17 @@ in
   config = lib.mkIf cfg.enable (
     lib.optionalAttrs hasComin {
       services.comin.postDeploymentCommand = lib.mkDefault hook;
+
+      # the fleet's repository, written once in mkFlake's `repo`
+      services.comin.remotes = lib.mkIf (config.fleet.meta.repoUrl != null) (
+        lib.mkDefault [
+          {
+            name = "origin";
+            url = config.fleet.meta.repoUrl;
+            branches.main.name = cfg.branch;
+          }
+        ]
+      );
 
       fleet.agents.sections.comin = {
         order = 50;
