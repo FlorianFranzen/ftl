@@ -102,7 +102,7 @@ in
       type = lib.types.nullOr lib.types.str;
       default = if withStatus != [ ] then (builtins.head withStatus).statusUrl else null;
       defaultText = lib.literalMD "the status page of the first fleet cache that has one";
-      example = "http://pavlov.lan:8080/status/nixrc.json";
+      example = "http://builder.lan:8080/status/fleet.json";
       description = "Builder status JSON endpoint used by ftl-status.";
     };
   };
@@ -115,8 +115,8 @@ in
       fallback = lib.mkDefault true;
     };
 
-    nix.gc = {
-      automatic = lib.mkDefault cfg.gc.automatic;
+    nix.gc = lib.mkIf cfg.gc.automatic {
+      automatic = lib.mkDefault true;
       dates = lib.mkDefault cfg.gc.dates;
       options = lib.mkDefault cfg.gc.options;
     };

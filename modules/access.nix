@@ -28,6 +28,8 @@ let
       lib.filterAttrs (_: u: builtins.elem fleet.self.name u.hosts) fleet.users;
 
   ssh = cfg.sshConfig;
+  # nixpkgs without the scripted initrd removed the switch (it is always systemd)
+  initrdSwitch = (options.boot.initrd.systemd.enable.visible or true) != false;
   # above NixOS's own mkDefault, below a host's plain setting
   aboveNixosDefault = lib.mkOverride 900;
   adminKeys = lib.concatMap (u: u.keys) (lib.filter (u: u.admin) (builtins.attrValues cfg.users));
@@ -78,9 +80,7 @@ let
   # root's, nix-daemon's (remote builds) or a service user's. The first value
   # ssh obtains wins, so this comes before the host blocks.
   forwardBlock = lib.optionalString (ssh.forwardAgent && cfg.users != { }) ''
-    Match originalhost ${
-      lib.concatStringsSep "," (lib.unique (lib.concatLists (lib.mapAttrsToList namesOf fleet.hosts)))
-    } localuser ${lib.concatStringsSep "," (builtins.attrNames cfg.users)}
+    Match originalhost ${lib.concatStringsSep "," (lib.unique (lib.concatLists (lib.mapAttrsToList namesOf fleet.hosts)))} localuser ${lib.concatStringsSep "," (builtins.attrNames cfg.users)}
       ForwardAgent yes
   '';
 
@@ -335,28 +335,30 @@ in
         }
       ];
 
-      boot.initrd = {
-        systemd.enable = lib.mkDefault true;
-        network = {
-          enable = true;
-          ssh = {
+      boot.initrd = lib.mkMerge [
+        {
+          network = {
             enable = true;
-            inherit (cfg.initrd) port;
-            hostKeys = [ cfg.initrd.hostKey ];
-            authorizedKeys = adminKeys;
+            ssh = {
+              enable = true;
+              inherit (cfg.initrd) port;
+              hostKeys = [ cfg.initrd.hostKey ];
+              authorizedKeys = adminKeys;
+            };
           };
-        };
-        # The uplink comes from fleet.network; without a `network` block, DHCP
-        # on any wired interface (the systemd initrd has no DHCP of its own).
-        systemd.network = lib.mkIf (!config.fleet.network.enable) {
-          enable = true;
-          networks."99-dhcp" = {
-            matchConfig.Name = "en* eth*";
-            networkConfig.DHCP = "yes";
+          # The uplink comes from fleet.network; without a `network` block, DHCP
+          # on any wired interface (the systemd initrd has no DHCP of its own).
+          systemd.network = lib.mkIf (!config.fleet.network.enable) {
+            enable = true;
+            networks."99-dhcp" = {
+              matchConfig.Name = "en* eth*";
+              networkConfig.DHCP = "yes";
+            };
           };
-        };
-        systemd.users.root.shell = aboveNixosDefault "/bin/systemd-tty-ask-password-agent";
-      };
+          systemd.users.root.shell = aboveNixosDefault "/bin/systemd-tty-ask-password-agent";
+        }
+        (lib.optionalAttrs initrdSwitch { systemd.enable = lib.mkDefault true; })
+      ];
     })
   ];
 }

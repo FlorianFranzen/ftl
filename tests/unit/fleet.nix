@@ -142,6 +142,22 @@ check "unit-fleet" (
       };
     };
 
+    # a host that substitutes from a fleet cache keeps nixpkgs' gc as it is
+    testClientNoGc = {
+      expr = {
+        client = (cfg "gamma").fleet.client.enable;
+        inherit ((cfg "gamma").nix.gc) automatic options;
+        # a string or a list, by nixpkgs version
+        dates = toString (cfg "gamma").nix.gc.dates;
+      };
+      expected = {
+        client = true;
+        automatic = false;
+        dates = "03:15";
+        options = "";
+      };
+    };
+
     testCaches = {
       expr = {
         caches = f.fleet.caches;

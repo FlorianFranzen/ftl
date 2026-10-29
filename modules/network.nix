@@ -22,6 +22,7 @@
 {
   config,
   lib,
+  options,
   ...
 }@args:
 
@@ -165,7 +166,14 @@ in
 
     # the same uplink in the initrd, wherever it brings up networking
     boot.initrd.systemd.network =
-      lib.mkIf (config.boot.initrd.network.enable && config.boot.initrd.systemd.enable)
+      # (nixpkgs without the scripted initrd removed the switch: always systemd)
+      lib.mkIf
+        (
+          config.boot.initrd.network.enable
+          && (
+            (options.boot.initrd.systemd.enable.visible or true) == false || config.boot.initrd.systemd.enable
+          )
+        )
         {
           enable = true;
           networks."10-wan" = ipv4 // {
