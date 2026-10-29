@@ -52,7 +52,10 @@ VM tests as `nix flake check`), what each check covers, a fleet's own checks
 against a local ftl, and the drills on real hosts. docs/review.md: where the
 risk is, the order to read the code in, the invariants, and the known gaps.
 
-There is no CI yet: the suites run by hand.
+CI (GitHub Actions) runs the fast checks for every push and pull request
+and the VM tests as separate jobs; a weekly job bumps each test channel's
+inputs and proposes them as a pull request, checked in full
+(docs/testing.md, "CI").
 
 ## Smartcards, AGENTS.md, ssh and Nix trust
 
@@ -128,8 +131,9 @@ Comparing each host's `system.build.toplevel` before and after
    with the open PR #334, which also sets `remote-program`). Until it
    lands, fleets push with `nix copy` through `sudo nix-daemon` first, or
    trust wheel.
-2. **CI:** the suites run by hand. `checks.<sys>.fast` on both channels is
-   cheap enough for every push; the VM tests need KVM.
-3. **The test channels:** `tests/unstable` is locked to a nixpkgs that still
-   has `boot.initrd.systemd.enable`, which newer nixpkgs removed (ftl copes
-   with both, checked by hand). Bumping that lock tests the newer side.
+2. **CI's first runs:** allow GitHub Actions to create pull requests (the
+   repository's Actions settings), watch the first `checks` run, and merge
+   the first `update tests` pull requests. `tests/unstable` is locked to a
+   nixpkgs that still has `boot.initrd.systemd.enable`, which newer nixpkgs
+   removed (ftl copes with both, checked by hand); the first bump tests the
+   newer side.

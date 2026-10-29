@@ -81,6 +81,27 @@ stubbed `nix eval`, but real ssh), a btrfs source, a ZFS target and an sftp
 If a VM test fails, `nix log <drv>` has the whole run. Searching it for `!!!`
 finds the failing subtest.
 
+## CI
+
+GitHub Actions run the same suites (`.github/workflows/`, the runner setup
+in `.github/actions/nix`: KVM opened, disk freed):
+
+- `checks`: `fast` on both channels for every push to `main` and every pull
+  request, then each VM test as a job of its own on unstable; on Mondays and
+  when started by hand, the VM tests on both channels.
+- `update tests`: on Mondays and when started by hand, each channel's lock
+  bumped to its inputs' heads (`nix flake update --flake ./tests/<channel>`),
+  every check run against it in that job, and a pull request opened or
+  refreshed on `update/tests-<channel>` with what changed and what failed.
+  Merging it moves the suite to the new inputs; a failing one says what a
+  newer nixpkgs, home-manager, sops-nix, comin or deploy-rs breaks.
+
+Pull requests from that workflow need "Allow GitHub Actions to create and
+approve pull requests" in the repository's Actions settings. Opened with
+the workflow's own token they start no other workflow, which is why the job
+checks for itself; a `FLAKE_UPDATE_TOKEN` secret (a fine-grained token with
+contents and pull-requests write) makes the regular checks run on them too.
+
 ## A fleet's own checks against a local ftl
 
 To try a fleet against a local, unpushed ftl, add

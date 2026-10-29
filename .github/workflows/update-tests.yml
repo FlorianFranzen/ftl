@@ -1,0 +1,80 @@
+# Every Monday, each test channel's inputs (nixpkgs, home-manager, sops-nix,
+# comin, deploy-rs) bumped to their heads, checked here in full, and proposed
+# as a pull request saying what changed and what failed.
+#
+# A pull request opened with the workflow's own token does not start other
+# workflows; with a FLAKE_UPDATE_TOKEN secret (a fine-grained token with
+# contents and pull-requests write) the regular checks run on it too.
+name: update tests
+
+on:
+  schedule:
+    - cron: "41 2 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    name: ${{ matrix.channel }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [stable, unstable]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/nix
+
+      - name: Update the lock
+        id: update
+        run: |
+          nix flake update --flake ./tests/${{ matrix.channel }} 2> update.log
+          cat update.log
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run every check
+        if: steps.update.outputs.changed == 'true'
+        run: |
+          f=./tests/${{ matrix.channel }}
+          names=$(nix eval --json "$f#checks.x86_64-linux" --apply builtins.attrNames | jq -r '.[] | select(. != "fast")')
+          failed=()
+          for n in $names; do
+            echo "::group::$n"
+            nix build -L --no-link "$f#checks.x86_64-linux.$n" || failed+=("$n")
+            echo "::endgroup::"
+          done
+          {
+            echo "## Inputs"
+            echo
+            echo '```'
+            grep -E "^(•|  )" update.log || cat update.log
+            echo '```'
+            echo
+            echo "## Checks"
+            echo
+            if [ "${#failed[@]}" -eq 0 ]; then
+              echo "Every check passes."
+            else
+              echo "Failing: ${failed[*]}. The run's log has each one."
+            fi
+          } > body.md
+          rm update.log
+
+      - uses: peter-evans/create-pull-request@v7
+        if: steps.update.outputs.changed == 'true'
+        with:
+          token: ${{ secrets.FLAKE_UPDATE_TOKEN || github.token }}
+          branch: update/tests-${{ matrix.channel }}
+          delete-branch: true
+          add-paths: tests/${{ matrix.channel }}/flake.lock
+          commit-message: "tests: ${{ matrix.channel }} inputs bumped"
+          title: "tests: ${{ matrix.channel }} inputs bumped"
+          body-path: body.md

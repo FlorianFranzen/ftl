@@ -1,0 +1,68 @@
+# The test suite (docs/testing.md): the fast checks on both channels for every
+# push and pull request, the VM tests on unstable, and every Monday both
+# channels in full.
+name: checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "23 3 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fast:
+    name: fast (${{ matrix.channel }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [stable, unstable]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/nix
+      - run: nix build -L --no-link ./tests/${{ matrix.channel }}#checks.x86_64-linux.fast
+
+  vm-tests:
+    name: list the VM tests
+    runs-on: ubuntu-latest
+    outputs:
+      names: ${{ steps.list.outputs.names }}
+      channels: ${{ steps.list.outputs.channels }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - id: list
+        run: |
+          # shellcheck disable=SC2016 # a Nix expression, not the shell's
+          names=$(nix eval --json ./tests/unstable#checks.x86_64-linux \
+            --apply 'cs: builtins.filter (n: cs.${n} ? driverInteractive) (builtins.attrNames cs)')
+          echo "names=$names" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = schedule ] || [ "${{ github.event_name }}" = workflow_dispatch ]; then
+            echo 'channels=["stable","unstable"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'channels=["unstable"]' >> "$GITHUB_OUTPUT"
+          fi
+
+  vm:
+    name: ${{ matrix.name }} (${{ matrix.channel }})
+    needs: [fast, vm-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        name: ${{ fromJSON(needs.vm-tests.outputs.names) }}
+        channel: ${{ fromJSON(needs.vm-tests.outputs.channels) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/nix
+      - run: nix build -L --no-link ./tests/${{ matrix.channel }}#checks.x86_64-linux.${{ matrix.name }}
