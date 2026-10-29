@@ -186,7 +186,7 @@ HUMAN.md where the work stands.
   # flake.nix: the admin's key works on every host
   smartcard.readers.yubikey = { vendor = "1050"; product = "0407"; };
 
-  # nixos/hosts/pavlov/host.nix: a build server with its own card, nobody at it
+  # nixos/hosts/builder/host.nix: a build server with its own card, nobody at it
   smartcard = {
     presence = "headless";               # "attended" (default): a person touches the key
     fleetReaders = false;                # not the fleet's readers, only its own
@@ -329,7 +329,7 @@ outputs = { self, nixpkgs, ftl, home-manager, ... }@inputs:
     src = ./.;
     inherit inputs;
     name = "myenv";
-    repo = "github:me/infra";       # or a git URL; git fetches use its git URL
+    repo = "github:me/fleet";       # or a git URL; git fetches use its git URL
     overlays = [ ];
     nixos = {
       specialArgs.username = "me";
@@ -364,7 +364,7 @@ Three things live under `nixos/` besides hosts, and they are easy to mix up:
 
   ```nix
   # nixos/services/mail/service.nix
-  { hosts = [ "darwin" ]; names = [ "mail.example.org" ]; }
+  { hosts = [ "alpha" ]; names = [ "mail.example.org" ]; }
 
   # nixos/services/tang/service.nix: two sides of one service
   { roles.server.hosts = [ "a" "b" ]; roles.client.hosts = [ "c" ]; layers = [ "tools" ]; }
@@ -435,9 +435,9 @@ Three things live under `nixos/` besides hosts, and they are easy to mix up:
   deploys:
 
   ```
-  fleetl service move web darwin          # from the one host web runs on
-  git commit -am 'web: on darwin'         # then deploy darwin, then the old host
-  fleetl state drop amphi web state       # once both are deployed and darwin runs it well
+  fleetl service move web beta            # from the one host web runs on
+  git commit -am 'web: on beta'           # then deploy beta, then the old host
+  fleetl state drop alpha web state       # once both are deployed and beta runs it well
   ```
 
   It checks where the service runs, which entries are its (`service =
@@ -509,7 +509,7 @@ Three things live under `nixos/` besides hosts, and they are easy to mix up:
   Hosts list their layers in `host.nix`. Each layer's revision comes from
   `ftl-layers.json`: `latest`, or the commit it last built at. A host with
   layers needs `fleet.layers.repo`, which defaults to `mkFlake`'s `repo` as a
-  git URL (`github:me/infra` becomes `https://github.com/me/infra.git`;
+  git URL (`github:me/fleet` becomes `https://github.com/me/fleet.git`;
   `ftl.lib.repo` does the conversion).
 - **`fleet.builder`** (pipeline) verifies the signature on the branch tip, bumps
   flake inputs per lane, builds everything in `fleet.manifest` with

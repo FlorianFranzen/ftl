@@ -97,7 +97,7 @@ in
       type = lib.types.nullOr lib.types.str;
       default = config.fleet.meta.repoUrl;
       defaultText = lib.literalExpression "config.fleet.meta.repoUrl";
-      example = "https://github.com/example/infra.git";
+      example = "https://github.com/example/fleet.git";
       description = "Git URL of the repository the layers are built from (by default the fleet's).";
     };
 

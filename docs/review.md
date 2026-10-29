@@ -16,7 +16,7 @@ The risk is concentrated in a few files:
 | `tests/backup.nix`, `tests/move.nix`, `tests/swap.nix` | ~1050 | What is actually proven. |
 
 Most of the rest is evaluation-time code (lib/, module options and their
-wiring), checked by the unit and flake tests; infra's hosts evaluated to
+wiring), checked by the unit and flake tests; a real fleet's hosts evaluated to
 identical derivations across the split of mkNixos. It can be reviewed
 more quickly.
 
@@ -82,8 +82,8 @@ that breaks one.
 
 ## What the reviews already found
 
-Seven independent review passes ran on these commits and on infra's
-adoption, the last a fresh read of the whole of it.
+Seven independent review passes ran on these commits and on a fleet's
+adoption of them, the last a fresh read of the whole of it.
 Every defect they reported was fixed and, where feasible, tested. The
 last pass judged the work ready to push. What they found:
 - **Restore** wrote into the live entry with `--delete`, wiping an entry
@@ -129,7 +129,7 @@ These are accepted for now, but worth a second opinion:
 - **Targets in the dependency walk.** A unit that needs a stopped entry's
   unit only through a `.target` is not seen as held.
 - **Old backups' top directory.** Backups made before the `fleet-root` tag
-  (all of infra's so far) restore with the top directory's owner and mode
+  restore with the top directory's owner and mode
   as they are on the host at the time.
 - **Setup and mounts.** A mount started by hand no longer pulls in
   `fleet-state.service`; where that service failed (at boot), an entry's
@@ -143,7 +143,7 @@ These are accepted for now, but worth a second opinion:
   through pam_rssh with the agent forwarded. Root on that host can use the
   agent meanwhile; `ssh-add -c` makes each use ask.
 - **Workstations.** Every host with btrfs or ZFS gets a small, inert
-  activation snippet, nixrc's workstations included.
+  activation snippet, workstations included.
 - **Not covered by a test** (a signal or a lost connection in the middle of
   a swap and `swap_recover` are covered by the `swap` VM test):
   - a signal to the whole process group in the middle of a swap (it kills

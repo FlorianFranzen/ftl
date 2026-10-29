@@ -351,7 +351,7 @@ pkgs.testers.runNixOSTest {
         for aside in asides("mail"):
             machine.succeed(f"fleet-state discard {aside}")
 
-    with subtest("a backup made before the tags (as infra's were) restores with the root as it is"):
+    with subtest("a backup made before the tags restores with the root as it is"):
         out = machine.succeed(
             "rustic -P state backup --no-progress --json --host alpha --label mail --as-path /var/lib/mail /var/lib/mail"
         )

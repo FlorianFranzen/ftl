@@ -1,6 +1,6 @@
 # Why a deploy can fail on a mount, and what couples it
 
-Found the hard way on 2026-10-22, deploying darwin in Denkmuskel/infra. Worth
+Found the hard way on 2026-10-22, deploying a fleet's host. Worth
 writing down because the failure looks like a storage problem and is not one,
 and because the coupling that causes it is a single line in
 `modules/state.nix`.
@@ -14,7 +14,7 @@ restarting the following units: srv-git.mount, srv-homework.mount, srv-media.mou
   sshd.service, var-lib-jellyfin.mount, var-lib-radarr.mount, var-lib-stalwart.mount, ...
 Failed to restart srv-media.mount
 ⚠️ [activate] [WARN] De-activating due to error
-❌ Deployment to node darwin failed, rolled back to previous generation
+❌ Deployment to node <host> failed, rolled back to previous generation
 ```
 
 `srv-media.mount` was `active (mounted)` the whole time. The journal says what
@@ -37,7 +37,7 @@ The mount unit was **byte-identical** between the running system and the new
 one, which is the first thing to check and the thing that makes this
 counter-intuitive. It was restarted because of what had changed in the
 *previous* generation: the entries' setup service was renamed
-(`infra-apps.service` → `fleet-state.service`), and the mount units name it:
+(the fleet's own `…-apps.service` → `fleet-state.service`), and the mount units name it:
 
 ```nix
 # modules/state.nix

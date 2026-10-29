@@ -4,7 +4,7 @@
 # Usage: ftl-cache-retention <cacheDir> <promoted.jsonl> <keepGenerations>
 #
 # The JSONL file is appended by ftl-pipeline on every promotion with lines
-# like {"attr":"nixos-lovelace","rev":"...","date":"...","outPath":"/nix/store/..."}.
+# like {"attr":"nixos-alpha","rev":"...","date":"...","outPath":"/nix/store/..."}.
 # Everything reachable (via narinfo References) from the kept generations
 # stays; every other .narinfo and nar file is deleted. The JSONL itself is
 # trimmed to the kept lines.

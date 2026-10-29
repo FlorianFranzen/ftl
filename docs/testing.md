@@ -64,7 +64,7 @@ The backup tests (`tests/backup.nix`) cover:
 - `freeze --stopped`;
 - refused repository accesses;
 - the top directory's owner and mode, including a backup made without the
-  tags, as all of infra's are so far;
+  tags (by an older fleet-state);
 - an entry with a dataset below it.
 
 The move test (`tests/move.nix`) runs an admin machine (fleetl with a
@@ -81,33 +81,25 @@ stubbed `nix eval`, but real ssh), a btrfs source, a ZFS target and an sftp
 If a VM test fails, `nix log <drv>` has the whole run. Searching it for `!!!`
 finds the failing subtest.
 
-## infra's own checks
+## A fleet's own checks against a local ftl
 
-infra has its own VM tests in `tests/`, including `backup-btrfs` and
-`backup-zfs`. These run the real Storage Box module against an sshd on
-port 23 playing the box. There is also the `fleet-sops` check:
-
-```
-cd ~/Denkmuskel/infra
-nix build --no-link -L .#checks.x86_64-linux.backup-btrfs .#checks.x86_64-linux.backup-zfs .#checks.x86_64-linux.fleet-sops
-```
-
-To try an infra change against a local, unpushed ftl, add
-`--override-input ftl path:/home/florian/Nix/ftl` (or
-`git+file:///home/florian/Nix/ftl?rev=<rev>` for an exact commit). The same
-works for `nix run .#fleetl -- …`.
+To try a fleet against a local, unpushed ftl, add
+`--override-input ftl path:/path/to/ftl` (or
+`git+file:///path/to/ftl?rev=<rev>` for an exact commit) to its
+`nix build .#checks…` or `nix flake check`. The same works for
+`nix run .#fleetl -- …`.
 
 To compare a host before and after a change without touching the working
 tree, evaluate both versions of ftl and diff them:
 
 ```
-a=$(nix eval --raw .#nixosConfigurations.darwin.config.system.build.toplevel.drvPath)
-b=$(nix eval --raw --override-input ftl path:/home/florian/Nix/ftl .#nixosConfigurations.darwin.config.system.build.toplevel.drvPath)
+a=$(nix eval --raw .#nixosConfigurations.<host>.config.system.build.toplevel.drvPath)
+b=$(nix eval --raw --override-input ftl path:/path/to/ftl .#nixosConfigurations.<host>.config.system.build.toplevel.drvPath)
 nix run nixpkgs#nix-diff -- "$a" "$b"
 ```
 
-Do not `git stash` in these repositories to get a "before" state. They are
-worked on in parallel.
+Compare against the committed lock rather than a `git stash`ed "before"
+state, which a parallel change in the same checkout would get mixed into.
 
 ## Drills on the real hosts, after the deploy
 
@@ -121,12 +113,11 @@ anything that matters, run these once.
      `fleet-root:` tags.
    - `/var/lib/prometheus-node-exporter-text-files/fleet-backup.prom` exists.
    - The alerts `BackupOverdue` and `BackupMissing` stay quiet.
-2. **A restore of something cheap.** For example `ntfy` or `alertmanager` on
-   amphi:
-   - `fleetl state restore amphi ntfy`; the service comes back on its own.
-   - `fleetl state list amphi` shows the copy kept aside.
-   - `fleetl state rollback amphi ntfy` swaps it back.
-   - `fleetl state discard amphi <aside>` removes it.
+2. **A restore of something cheap**, an entry whose loss would not hurt:
+   - `fleetl state restore <host> <entry>`; the service comes back on its own.
+   - `fleetl state list <host>` shows the copy kept aside.
+   - `fleetl state rollback <host> <entry>` swaps it back.
+   - `fleetl state discard <host> <aside>` removes it.
 3. **A move of a throwaway service.** Do not start with a real service.
    - Add a small service (one state entry, one unit, a fixed uid) to two
      hosts' reach, and give it some data.
