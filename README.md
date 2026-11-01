@@ -107,7 +107,10 @@ HUMAN.md where the work stands.
   so without `localPasswords` there is no console login), turns off password and
   root login in sshd, lets admins sudo against their forwarded SSH agent
   (pam_rssh, with the same authorized keys), and puts every host's `ssh.pub`
-  (and `initrd.pub`) into `known_hosts`. The sshd policy and the shell sit
+  (and `initrd.pub`) into `known_hosts`. Where tmux is enabled, shells in tmux use
+  `~/.ssh/agent.sock`, which follows the agent of the client that attached
+  or was used last, so sudo works in a session that outlived its login
+  (`fleet.access.tmuxAgent`). The sshd policy and the shell sit
   just above nixpkgs' own `mkDefault`s (whose installation profiles allow
   root), so a host's plain setting still wins; sudo and
   `users.mutableUsers = false` are `mkDefault`; the accounts are plain.

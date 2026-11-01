@@ -90,6 +90,8 @@ let
     #    fixture's and the template's AGENTS.md are current (fleet-agents)
     cli = import ./cli.nix args;
     generators = import ./generators.nix args;
+    # the access module's tmux.conf against agents on a tmux server of its own
+    tmux-agent = import ./tmux-agent.nix args;
     agents = import ./agents.nix args;
     # fleetl check names the metadata file that breaks the fleet
     fleetl-check = import ./check.nix args;

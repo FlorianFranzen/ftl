@@ -8,6 +8,11 @@
 # the sshd policy and shells sit just above nixpkgs' own mkDefaults (its
 # installation profiles allow root), the rest is mkDefault.
 #
+# With tmux, a shell keeps the agent of the login that started it, and sudo
+# fails once that connection is gone: tmuxAgent points every shell in tmux at
+# ~/.ssh/agent.sock instead, a link that tmux-ssh-agent moves to the agent of
+# the client that attached or was used last.
+#
 # Standalone (without the `fleet` argument) `fleet.access.users` is set by hand.
 {
   config,
@@ -19,6 +24,10 @@
 
 let
   cfg = config.fleet.access;
+
+  inherit (import ./scripts.nix { inherit pkgs; }) tmux-ssh-agent;
+  agent = lib.getExe tmux-ssh-agent;
+  agentHook = "run-shell '${agent} #{client_pid} >/dev/null || true'";
 
   fleet = args.fleet or null;
   hostUsers =
@@ -169,6 +178,18 @@ in
       '';
     };
 
+    tmuxAgent = lib.mkOption {
+      type = lib.types.bool;
+      default = cfg.sudo && config.programs.tmux.enable;
+      defaultText = lib.literalExpression "fleet.access.sudo && programs.tmux.enable";
+      description = ''
+        Shells in tmux use ~/.ssh/agent.sock, which points at the SSH agent of
+        the tmux client that attached or was used last (forwarded over SSH, or
+        the local one at the machine), so sudo keeps working in a session
+        that outlived its login.
+      '';
+    };
+
     knownHosts = lib.mkOption {
       type = lib.types.bool;
       default = true;
@@ -282,6 +303,27 @@ in
       programs.zsh.enable = lib.mkIf (builtins.elem "zsh" shells) (lib.mkDefault true);
       programs.fish.enable = lib.mkIf (builtins.elem "fish" shells) (lib.mkDefault true);
 
+      environment.systemPackages = lib.mkIf cfg.tmuxAgent [ tmux-ssh-agent ];
+      # tmux's default update-environment without SSH_AUTH_SOCK: panes use the link.
+      programs.tmux.extraConfig = lib.mkIf cfg.tmuxAgent ''
+        set -g update-environment "DISPLAY KRB5CCNAME MSYSTEM SSH_ASKPASS SSH_AGENT_PID SSH_CONNECTION WAYLAND_DISPLAY WINDOWID XAUTHORITY XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_SESSION_TYPE"
+        set-environment -g SSH_AUTH_SOCK "$HOME/.ssh/agent.sock"
+        set-hook -ga session-created "${agentHook}"
+        set-hook -ga client-attached "${agentHook}"
+        set-hook -ga client-active "${agentHook}"
+      '';
+      # Also shells from before the tmux server read this; in zsh the next
+      # prompt moves a dead link on.
+      environment.interactiveShellInit = lib.mkIf cfg.tmuxAgent ''
+        if [ -n "$TMUX" ]; then export SSH_AUTH_SOCK="$HOME/.ssh/agent.sock"; fi
+      '';
+      programs.zsh.interactiveShellInit = lib.mkIf cfg.tmuxAgent ''
+        if [[ -n $TMUX ]]; then
+          _tmux_ssh_agent() { [[ -S $SSH_AUTH_SOCK ]] || ${agent} >/dev/null 2>&1 }
+          precmd_functions+=(_tmux_ssh_agent)
+        fi
+      '';
+
       programs.ssh.knownHosts = lib.mkIf (cfg.knownHosts && fleet != null) (
         lib.mkMerge (lib.mapAttrsToList knownHost fleet.hosts)
       );
@@ -306,6 +348,12 @@ in
           (pam_rssh): it fails in a session without a forwarded agent, and a key
           that needs a touch needs one for sudo too. Do not try to work around it
           (no password is set, and none should be).
+        ''
+        + lib.optionalString cfg.tmuxAgent ''
+
+          In tmux, SSH_AUTH_SOCK is ~/.ssh/agent.sock, a link to the agent of the
+          tmux client that attached or was used last; `tmux-ssh-agent` moves it
+          to the newest forwarded agent that answers.
         ''
         + lib.optionalString (cfg.sudo && config.fleet.nix.enable && !config.fleet.nix.trustWheel) ''
 

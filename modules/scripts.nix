@@ -90,4 +90,17 @@ rec {
     ];
     text = builtins.readFile ../scripts/ftl-status.sh;
   };
+
+  # The SSH agent of the tmux client that attached or was used last, behind
+  # ~/.ssh/agent.sock (fleet.access.tmuxAgent).
+  tmux-ssh-agent = pkgs.writeShellApplication {
+    name = "tmux-ssh-agent";
+    runtimeInputs = with pkgs; [
+      openssh
+      gnused
+      findutils
+      coreutils
+    ];
+    text = builtins.readFile ../scripts/tmux-ssh-agent.sh;
+  };
 }
