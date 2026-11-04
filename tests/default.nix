@@ -125,6 +125,7 @@ let
     layers = import ./layers.nix { inherit pkgs ftl; };
     pipeline = import ./pipeline.nix { inherit pkgs ftl; };
     pipeline-agent = import ./pipeline-agent.nix { inherit pkgs ftl; };
+    pipeline-propose = import ./pipeline-propose.nix { inherit pkgs ftl; };
     cache = import ./cache.nix { inherit pkgs ftl; };
     # fleet.secrets with sops-nix for real: decryption with the SSH host key
     services = import ./services.nix { inherit pkgs ftl sops-nix; };

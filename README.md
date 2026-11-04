@@ -518,8 +518,12 @@ Three things live under `nixos/` besides hosts, and they are easy to mix up:
   flake inputs per lane, builds everything in `fleet.manifest` with
   `nix-fast-build`, pushes the (daemon-signed) results into a `file://` cache,
   and fast-forwards the deployed branch with a signed lock-bump commit once
-  every required host builds. A red layer is pinned in `ftl-layers.json`, never
-  blocking. Lanes of one repo run one at a time.
+  every required host builds (`promote`). A red layer is pinned in
+  `ftl-layers.json`, never blocking. With `propose` instead, the green bump is
+  force-pushed to `update/<lane>` for you to merge, and nothing deploys on its
+  own: checks and a cache for a fleet deployed by hand, no commit signing key
+  needed. With neither, the pipeline only builds, caches and reports. Lanes of
+  one repo run one at a time.
 - **`fleet.cache`** serves that cache and the status JSON. It is plain HTTP on
   all interfaces; NAR signatures carry the trust, and the status pages list
   the fleet's hosts, so `openFirewall` is off by default.
@@ -681,4 +685,6 @@ see whether the library still works with the channel's current head:
     daemon-signed cache, refusal of an unsigned branch tip, lane locking;
   - `pipeline-agent`: the pipeline with keys only in an ssh-agent (push and
     commit signing through it) and the cache signed by a sign command;
+  - `pipeline-propose`: green bumps proposed on `update/<lane>`, red ones on
+    `broken/<lane>`, the branch untouched, a merged proposal removed;
   - `cache`: signed substitution.

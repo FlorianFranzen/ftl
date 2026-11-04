@@ -7,7 +7,7 @@
 if [ -n "${FTL_STATUS_URL:-}" ] && out="$(curl -fsS -m 10 "$FTL_STATUS_URL" 2>/dev/null)"; then
   echo "$out" | jq -r '
     "environment: \(.environment)   lane: \(.lane)   run: \(.run)",
-    "candidate:   \(.candidate)   promoted: \(.promoted)",
+    "candidate:   \(.candidate)   promoted: \(.promoted)   proposed: \(.proposed // false)",
     "",
     (.attrs | to_entries[] |
       "  \(if .value.status == "ok" then "✓" elif .value.status == "skipped" then "-" else "✗" end) \(.key) [\(.value.importance)] \(.value.status)")'

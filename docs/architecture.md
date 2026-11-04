@@ -344,7 +344,7 @@ arguments; stores need `root`.
   flakeAttr; } }`.
 - `share/ftl-layer/meta.json` in a layer: `{ name; kind; units; }`.
 - `<rootDir>/status/<name>.json` (builder): the lane's last run per check;
-  `<stateDir>/<repo>/promoted.jsonl`: one line per promotion
+  `<stateDir>/<repo>/promoted.jsonl`: one line per promotion or proposal
   (`{ attr; rev; date; outPath; }`), the retention's input.
 - `.sops.yaml`: generated; `creation_rules` with one `path_regex` per store,
   `key_groups` of `pgp` fingerprints and `age` recipients.
@@ -478,15 +478,17 @@ arguments; stores need `root`.
   `units` layers.
 - `ftl-pipeline.sh` (builder): environment from `modules/builder.nix`
   (`FTL_REPO_*`, `FTL_LANE*`, `FTL_SIGN_*`, `FTL_VERIFY_*`, `FTL_CACHE_*`,
-  `FTL_PROMOTE`, ...); bumps the lane's inputs, builds `fleet.manifest`,
-  pushes to the cache, pins red layers, fast-forwards the deployed branch.
+  `FTL_PROMOTE`, `FTL_PROPOSE`, ...); bumps the lane's inputs, builds
+  `fleet.manifest`, pushes to the cache, then either pins red layers and
+  fast-forwards the deployed branch, or pushes the green bump to
+  `update/<lane>`.
 - `ftl-status.sh` (hosts): `FTL_STATUS_URL`, `FTL_REPO_URL`.
 - `tmux-ssh-agent.sh` (hosts, from the access module's tmux hooks): links
   `~/.ssh/agent.sock` to the `SSH_AUTH_SOCK` in `/proc/<client pid>/environ`,
   else to the newest `~/.ssh/agent/s.*.sshd.*` that answers `ssh-add -l`.
 - `ftl-cache-retention.sh` (builder): prunes the cache down to the closures
-  of the last `keepGenerations` promoted generations per attribute, from the
-  promotion log `ftl-pipeline` appends to.
+  of the last `keepGenerations` promoted or proposed generations per
+  attribute, from the log `ftl-pipeline` appends to.
 
 ## tests/
 

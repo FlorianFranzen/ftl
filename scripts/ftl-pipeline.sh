@@ -1,6 +1,7 @@
 # ftl-pipeline: update one lane of one environment repo, build its manifest
 # attrs, publish results to the binary cache and (optionally) fast-forward the
-# deployed branch, pinning layers that failed to their last green commit. Designed to run as a systemd oneshot; all configuration via FTL_*
+# deployed branch, pinning layers that failed to their last green commit, or
+# propose the green bump on update/<lane> instead. Designed to run as a systemd oneshot; all configuration via FTL_*
 # environment variables (set by the fleet.builder NixOS module).
 #
 # Required: FTL_REPO_NAME FTL_REPO_URL FTL_STATE_DIR FTL_STATUS_DIR FTL_SYSTEMS
@@ -9,7 +10,7 @@
 #           nix-daemon or the sign command; nothing is pushed otherwise)
 #           FTL_CACHE_DAEMON_SIGNED (1 when nix-daemon signs at build time)
 #           FTL_CACHE_SIGN_COMMAND (run as `cmd <cache dir> <queue file>` after
-#           each build) FTL_PROMOTE (0) FTL_KEEP_GENERATIONS (5)
+#           each build) FTL_PROMOTE (0) FTL_PROPOSE (0) FTL_KEEP_GENERATIONS (5)
 #           FTL_SIGN_FORMAT (none|ssh|openpgp) FTL_SIGN_KEY FTL_GIT_NAME FTL_GIT_EMAIL
 #           FTL_VERIFY_MODE (none|ssh|gpg) FTL_ALLOWED_SIGNERS FTL_VERIFY_GPG_HOME
 #           FTL_DEPLOY_KEY FTL_KNOWN_HOSTS FTL_METRICS_FILE FTL_NTFY_URL
@@ -19,6 +20,7 @@
 : "${FTL_LANE:=default}"
 : "${FTL_LANE_INPUTS:=}"
 : "${FTL_PROMOTE:=0}"
+: "${FTL_PROPOSE:=0}"
 : "${FTL_KEEP_GENERATIONS:=5}"
 : "${FTL_SIGN_FORMAT:=none}"
 : "${FTL_VERIFY_MODE:=none}"
@@ -102,17 +104,17 @@ record_attr() { # name system importance host layer status outPath
     "$attrs_json" >"$attrs_json.tmp" && mv "$attrs_json.tmp" "$attrs_json"
 }
 
-finish() { # phase promoted
+finish() { # phase promoted proposed
   local prev_file="$state/prev-status.json"
   [ -f "$status_file" ] && cp "$status_file" "$prev_file" || echo '{}' >"$prev_file"
   jq -n --arg env "$FTL_REPO_NAME" --arg repo "$repo_public" --arg lane "$FTL_LANE" \
     --arg run "$now" --arg candidate "$candidate" --arg candidateTree "$candidate_tree" \
     --arg phase "$1" \
-    --argjson bumped "$bumped" --argjson promoted "${2:-false}" \
+    --argjson bumped "$bumped" --argjson promoted "${2:-false}" --argjson proposed "${3:-false}" \
     --slurpfile attrs "$attrs_json" \
     '{environment:$env, repo:$repo, lane:$lane, run:$run, candidate:$candidate,
       candidateTree:$candidateTree, phase:$phase, bumped:($bumped==1),
-      promoted:$promoted, attrs:$attrs[0]}' \
+      promoted:$promoted, proposed:$proposed, attrs:$attrs[0]}' \
     >"$status_file.tmp" && mv "$status_file.tmp" "$status_file"
 
   # Prometheus textfile metrics
@@ -273,19 +275,50 @@ if [ -n "$cache_url" ] && [ -n "${FTL_CACHE_SIGN_COMMAND:-}" ] && [ "${#green_ou
   fi
 fi
 
+# Record a published generation (per attr and system) for cache retention,
+# then prune the cache down to the last FTL_KEEP_GENERATIONS of them.
+record_generation() {
+  jq -r --arg rev "$candidate" --arg date "$now" \
+    'to_entries[] | .key as $a | .value.systems | to_entries[] |
+     select(.value.status == "ok") |
+     {attr:"\($a)@\(.key)", rev:$rev, date:$date, outPath:.value.outPath} | @json' \
+    "$attrs_json" >>"$jsonl"
+  if [ -n "$cache_url" ]; then
+    ftl-cache-retention "$FTL_CACHE_DIR" "$jsonl" "$FTL_KEEP_GENERATIONS" ||
+      log "cache retention failed (non-fatal)"
+  fi
+}
+
 # --- promote ----------------------------------------------------------------
 # Hosts follow $FTL_BRANCH with comin, which only accepts fast-forwards. The
 # candidate (branch tip + signed lock bump) is pushed onto the branch when
 # every required attr built. Layers never gate: ftl-layers.json pins a red
 # layer to the last commit at which it built, so hosts keep running that.
 promoted=false
+proposed=false
 if [ "$required_red" = 1 ]; then
-  if [ "$FTL_PROMOTE" = 1 ]; then
+  if [ "$FTL_PROMOTE" = 1 ] || [ "$FTL_PROPOSE" = 1 ]; then
     # One ref per lane, force-updated: a bookmark of the last red candidate,
     # not a growing history of them.
     git push --quiet --force upstream "$candidate:refs/heads/broken/$FTL_LANE"
   fi
   notify "required build FAILED at $candidate; $FTL_BRANCH not updated"
+elif [ "$FTL_PROPOSE" = 1 ]; then
+  # --- propose ---------------------------------------------------------------
+  # The green candidate waits on update/<lane> for a person to merge; the
+  # branch itself is never touched. One ref per lane, force-updated, and
+  # deleted once the branch has nothing left to take from this lane.
+  update_ref="refs/heads/update/$FTL_LANE"
+  if [ "$candidate" != "$base_sha" ]; then
+    git push --quiet --force upstream "$candidate:$update_ref"
+    proposed=true
+    log "proposed $candidate on update/$FTL_LANE"
+    notify "update/$FTL_LANE: $candidate builds; merge it into $FTL_BRANCH"
+    record_generation
+  elif git rev-parse --quiet --verify "refs/remotes/origin/update/$FTL_LANE" >/dev/null; then
+    git push --quiet upstream ":$update_ref"
+    log "nothing to bump; removed update/$FTL_LANE"
+  fi
 elif [ "$FTL_PROMOTE" = 1 ]; then
   green_file="$state/layers-green.json"
   [ -f "$green_file" ] || echo '{}' >"$green_file"
@@ -342,20 +375,9 @@ elif [ "$FTL_PROMOTE" = 1 ]; then
       fi
     done
   fi
-  if [ "$pushed" = true ]; then
-    # Record promoted generations (per attr and system) for cache retention.
-    jq -r --arg rev "$candidate" --arg date "$now" \
-      'to_entries[] | .key as $a | .value.systems | to_entries[] |
-       select(.value.status == "ok") |
-       {attr:"\($a)@\(.key)", rev:$rev, date:$date, outPath:.value.outPath} | @json' \
-      "$attrs_json" >>"$jsonl"
-    if [ -n "$cache_url" ]; then
-      ftl-cache-retention "$FTL_CACHE_DIR" "$jsonl" "$FTL_KEEP_GENERATIONS" ||
-        log "cache retention failed (non-fatal)"
-    fi
-  fi
+  if [ "$pushed" = true ]; then record_generation; fi
 fi
 
-finish "done" "$promoted"
-log "run complete (required_red=$required_red promoted=$promoted)"
+finish "done" "$promoted" "$proposed"
+log "run complete (required_red=$required_red promoted=$promoted proposed=$proposed)"
 [ "$required_red" = 0 ]

@@ -52,7 +52,7 @@ nix build --no-link --no-write-lock-file -L ./tests/unstable#checks.x86_64-linux
 | `move` | VM, 4 nodes | See below. |
 | `swap` | VM | fleet-state's swap under failure: `swap_recover` after a failed second rename, TERM and HUP held until the entry is whole. |
 | `fleetl-check` | build | `fleetl check` names the broken metadata file. |
-| `layers`, `pipeline`, `pipeline-agent`, `cache` | VM | Layers and the update pipeline (the oldest part of ftl). |
+| `layers`, `pipeline`, `pipeline-agent`, `pipeline-propose`, `cache` | VM | Layers and the update pipeline (the oldest part of ftl). |
 | `services` | VM | sops-nix decrypting with the SSH host key. |
 
 The backup tests (`tests/backup.nix`) cover:

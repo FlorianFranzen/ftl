@@ -87,6 +87,19 @@ in
       description = "Fast-forward the deployed branch (and push broken/* refs) after building.";
     };
 
+    propose = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Instead of fast-forwarding the deployed branch, force-push each lane's
+        green lock bump to `update/<lane>` (red ones to `broken/<lane>`) for a
+        person to merge; nothing deploys on its own. The bump commit is signed
+        only when `signing` is set; with `verify`, merge it with a signed commit
+        of your own (`git merge --no-ff -S update/<lane>`), as the pipeline
+        builds only on a signed tip. Layer pins are left alone. Excludes `promote`.
+      '';
+    };
+
     evalWorkers = lib.mkOption {
       type = lib.types.ints.positive;
       default = 2;
@@ -343,6 +356,10 @@ in
         assertion = lib.all (rb: rb.publicHostKey != null) (builtins.attrValues enabledRemotes);
         message = "fleet.builder.remoteBuilders.<name>.publicHostKey must be set: outputs of an unauthenticated remote would be signed and promoted";
       }
+      {
+        assertion = !(cfg.promote && cfg.propose);
+        message = "fleet.builder.promote and fleet.builder.propose exclude each other";
+      }
     ];
 
     users.users.${cfg.user} = {
@@ -417,6 +434,7 @@ in
               FTL_STATUS_DIR = cfg.statusDir;
               FTL_SYSTEMS = lib.concatStringsSep " " repo.systems;
               FTL_PROMOTE = if cfg.promote then "1" else "0";
+              FTL_PROPOSE = if cfg.propose then "1" else "0";
               FTL_KEEP_GENERATIONS = toString repo.keepGenerations;
               FTL_SIGN_FORMAT = cfg.signing.format;
               FTL_GIT_NAME = cfg.signing.name;

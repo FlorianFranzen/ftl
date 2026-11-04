@@ -150,7 +150,9 @@ let
       [
         "- system `${h.system}`, importance `${h.importance}`"
         "- services: ${if h.services == [ ] then "-" else concatMapStringsSep ", " serviceText h.services}"
-        "- layers: ${codes h.layers}"
+      ]
+      ++ lib.optional (h.layers != [ ]) "- layers: ${codes h.layers}"
+      ++ [
         "- users: ${if h.users == [ ] then "-" else concatMapStringsSep ", " userText h.users}"
         "- public keys: ${codes (builtins.attrNames (h.keys or { }))}"
       ]
@@ -193,7 +195,11 @@ in
       hostNames = builtins.attrNames hosts;
       withReaders = lib.filterAttrs (_: h: h.smartcard or null != null) hosts;
       presences = lib.unique (lib.mapAttrsToList (_: h: h.smartcard.presence) withReaders);
-      hasLayers = lib.any (h: h.layers != [ ]) (builtins.attrValues hosts);
+      # without any, the file leaves layers out entirely
+      hasLayers =
+        lib.any (h: h.layers != [ ]) (builtins.attrValues hosts)
+        || lib.any (s: s.layers != [ ]) (builtins.attrValues services);
+      layerColumn = lib.optional hasLayers "layers";
 
       hostRows = map (
         n:
@@ -205,7 +211,9 @@ in
           h.system
           h.importance
           (codes h.services)
-          (codes h.layers)
+        ]
+        ++ lib.optional hasLayers (codes h.layers)
+        ++ [
           (codes h.users)
           (presenceText (h.smartcard or null))
         ]
@@ -223,15 +231,18 @@ in
         (codes u.services)
       ]) users;
 
-      serviceRows = lib.mapAttrsToList (n: s: [
-        "`${n}`"
-        (concatStringsSep "; " (
-          lib.mapAttrsToList (
-            r: rv: if r == "default" then codes rv.hosts else "${r}: ${codes rv.hosts}"
-          ) s.roles
-        ))
-        (codes s.layers)
-      ]) services;
+      serviceRows = lib.mapAttrsToList (
+        n: s:
+        [
+          "`${n}`"
+          (concatStringsSep "; " (
+            lib.mapAttrsToList (
+              r: rv: if r == "default" then codes rv.hosts else "${r}: ${codes rv.hosts}"
+            ) s.roles
+          ))
+        ]
+        ++ lib.optional hasLayers (codes s.layers)
+      ) services;
 
       extraText = map (e: if builtins.isString e then e else builtins.readFile e) extra;
     in
@@ -248,23 +259,31 @@ in
           outputs. Every host also carries its own part of this file as
           `/etc/AGENTS.md`, with what its configuration adds.''
         "## Layout"
-        ''
-          - `nixos/hosts/<host>/`: one folder per host. `host.nix` is metadata (a
-            plain attribute set, never a module): `system`, `importance`, `layers`,
-            `smartcard`, plus free-form data such as `fqdn`. Every other `.nix` file
-            there is a module of that host; `*.pub` files are its public keys.
-          - `nixos/services/<service>/`: modules imported on the hosts its
-            `service.nix` names; moving a service is editing that list.
-          - `nixos/modules/`: imported into every host; `nixos/profiles/`: opt-in
-            building blocks (the `profiles` argument).
-          - `nixos/layers/<layer>.nix`: Nix profiles updated without a system
-            rebuild; `ftl-layers.json` pins their revisions.
-          - `home/`: home-manager modules, profiles and variants; configurations
-            are named `<base>-<variant>`.
-          - `users/<user>/`: `user.nix` (where the user has an account) and
-            `ssh.pub` (the keys for login, sudo and deploying).
-          - `pkgs/`: own packages and the overlay; `static/`: files the modules
-            reference as `static.<name>`.''
+        (concatStringsSep "\n" (
+          [
+            ''
+              - `nixos/hosts/<host>/`: one folder per host. `host.nix` is metadata (a
+                plain attribute set, never a module): `system`, `importance`,${optionalString hasLayers " `layers`,"}
+                `smartcard`, plus free-form data such as `fqdn`. Every other `.nix` file
+                there is a module of that host; `*.pub` files are its public keys.
+              - `nixos/services/<service>/`: modules imported on the hosts its
+                `service.nix` names; moving a service is editing that list.
+              - `nixos/modules/`: imported into every host; `nixos/profiles/`: opt-in
+                building blocks (the `profiles` argument).''
+          ]
+          ++ lib.optional hasLayers ''
+            - `nixos/layers/<layer>.nix`: Nix profiles updated without a system
+              rebuild; `ftl-layers.json` pins their revisions.''
+          ++ [
+            ''
+              - `home/`: home-manager modules, profiles and variants; configurations
+                are named `<base>-<variant>`.
+              - `users/<user>/`: `user.nix` (where the user has an account) and
+                `ssh.pub` (the keys for login, sudo and deploying).
+              - `pkgs/`: own packages and the overlay; `static/`: files the modules
+                reference as `static.<name>`.''
+          ]
+        ))
         "## Working here"
         ''
           - Nix sees only files known to git: `git add` new files (intent-to-add,
@@ -272,8 +291,12 @@ in
           - Check a change with `nix flake check`, or one host with `nix build
             .#nixosConfigurations.<host>.config.system.build.toplevel`.
           - Generated files are never edited by hand: `.sops.yaml` (`fleetl secrets
-            sync`), `AGENTS.md` (`fleetl agents sync`) and `ftl-layers.json`
-            (written by the build pipeline). `fleetl` is `nix run .#fleetl -- ...`.
+            sync`)${
+              if hasLayers then
+                ", `AGENTS.md` (`fleetl agents sync`) and `ftl-layers.json`\n  (written by the build pipeline)"
+              else
+                " and `AGENTS.md` (`fleetl agents sync`)"
+            }. `fleetl` is `nix run${if hasLayers then " " else "\n  "}.#fleetl -- ...`.
           - Secrets live in sops stores (`secrets.yaml`, `identity.yaml`) next to
             what they belong to. Never decrypt one into the working tree, print a
             secret, or commit plaintext; `fleetl secrets edit <store>` opens one.
@@ -281,15 +304,19 @@ in
             what the branch says, and changes made on a machine are lost with the
             next deployment.''
         "## Hosts"
-        (table [
-          "host"
-          "system"
-          "importance"
-          "services"
-          "layers"
-          "users"
-          "hardware key"
-        ] hostRows)
+        (table (
+          [
+            "host"
+            "system"
+            "importance"
+            "services"
+          ]
+          ++ layerColumn
+          ++ [
+            "users"
+            "hardware key"
+          ]
+        ) hostRows)
         ''
           A `required` host that fails to build blocks the update of the fleet, an
           `optional` one does not, and an `ignored` one is not built.''
@@ -328,11 +355,13 @@ in
       ]
       ++ lib.optionals (services != { }) [
         "## Services"
-        (table [
-          "service"
-          "hosts"
-          "layers"
-        ] serviceRows)
+        (table (
+          [
+            "service"
+            "hosts"
+          ]
+          ++ layerColumn
+        ) serviceRows)
       ]
       ++ lib.optionals (users != { }) [
         "## Users"
