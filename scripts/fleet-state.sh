@@ -871,7 +871,20 @@ cmd_backup() {
 
   lock
   if [ "$backend" = btrfs ]; then mount_top; fi
+  # each repository these entries go to, once: one that does not exist (never
+  # made by fleet-state init) or cannot be reached fails its own entries, said
+  # plainly, and leaves the others to their backup
+  local kind
+  for kind in $(for name in "${names[@]}"; do field "$name" kind; done | sort -u); do
+    repo_check "$kind"
+  done
   for name in "${names[@]}"; do
+    kind="$(field "$name" kind)"
+    if [ -n "${repo_down[$kind]:-}" ]; then
+      log "$name: not backed up, the $kind repository is not there"
+      failed+=("$name")
+      continue
+    fi
     # one failing entry does not keep the others from their backup
     scoped backup_entry "$name"
     [ "$scoped_rc" = 0 ] || failed+=("$name")
@@ -880,8 +893,9 @@ cmd_backup() {
     # pruning goes by host, label and path, so a failed entry is no reason
     # to let the others' history grow; this host's only, in a repository
     # other hosts share
-    local kind
     for kind in $(jq -r '.kinds[]' "$backup_json"); do
+      repo_check "$kind"
+      [ -z "${repo_down[$kind]:-}" ] || continue
       rustic -P "$(profile "$kind")" forget --prune --no-progress --filter-host "$host"
     done
     write_metrics "${#failed[@]}"
@@ -891,10 +905,24 @@ cmd_backup() {
   fi
 }
 
+# repo_check <kind>: whether the kind's repository is there (its config
+# readable), once per run; a missing one goes into repo_down, with why.
+declare -A repo_down=() repo_checked=()
+repo_check() {
+  local kind="$1"
+  [ -z "${repo_checked[$kind]:-}" ] || return 0
+  repo_checked[$kind]=1
+  if ! rustic -P "$(profile "$kind")" cat config >/dev/null 2>"$scratch/repo-$kind.err"; then
+    repo_down[$kind]=1
+    log "the $kind repository does not exist or cannot be reached (fleet-state init makes a missing one):"
+    sed 's/^/  /' "$scratch/repo-$kind.err" | tail -n 3 >&2
+  fi
+}
+
 # For monitors: when the last complete backup succeeded (kept from before
-# when this one did not), and how many snapshots each repository holds, so
-# that history disappearing from it is noticed although the backups
-# themselves keep succeeding.
+# when this one did not), whether each repository is there, and how many
+# snapshots each holds, so that history disappearing from it is noticed
+# although the backups themselves keep succeeding.
 write_metrics() { # <number of failed entries>
   local metrics kind count last
   metrics="$(jq -r '.metrics // empty' "$backup_json")"
@@ -908,6 +936,12 @@ write_metrics() { # <number of failed entries>
   {
     if [ -n "$last" ]; then echo "$last"; fi
     for kind in $(jq -r '.kinds[]' "$backup_json"); do
+      repo_check "$kind"
+      if [ -n "${repo_down[$kind]:-}" ]; then
+        echo "fleet_backup_repository_up{kind=\"$kind\"} 0"
+        continue
+      fi
+      echo "fleet_backup_repository_up{kind=\"$kind\"} 1"
       count="$(rustic -P "$(profile "$kind")" snapshots --json | jq '[.[].snapshots[]] | length')"
       echo "fleet_backup_snapshots{kind=\"$kind\"} $count"
     done

@@ -408,9 +408,13 @@ Three things live under `nixos/` besides hosts, and they are easy to mix up:
   host as host and `fleet-entry:<entry>`, `fleet-service:<service>` as tags.
   Repositories are only created by `fleet-state init` (or the
   `fleet-backup-init` service), never by a backup. `/etc/rustic/<kind>.toml`
-  makes them usable by hand (`rustic -P state snapshots`);
-  `metrics.textfileDir` writes `fleet_backup_last_success_timestamp_seconds`
-  and `fleet_backup_snapshots{kind}` for node_exporter.
+  makes them usable by hand (`rustic -P state snapshots`). A backup checks
+  each repository first: one that is missing (a kind's first entry needs
+  `fleet-state init` again) or out of reach fails its own entries, by name,
+  and the other kinds are still backed up and pruned.
+  `metrics.textfileDir` writes `fleet_backup_last_success_timestamp_seconds`,
+  `fleet_backup_repository_up{kind}` and `fleet_backup_snapshots{kind}` for
+  node_exporter.
 
   A restore puts an entry back: `fleetl state restore <host> <entry>
   [--snapshot <id>]` (on the host: `fleet-state restore`) restores the

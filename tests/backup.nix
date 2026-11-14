@@ -459,10 +459,20 @@ pkgs.testers.runNixOSTest {
         machine.succeed("systemctl start fleet-backup.service")
         no_leftovers()
 
-    with subtest("a repository gone missing fails the next backup"):
+    with subtest("a repository gone missing fails the next backup, says so, and the metrics say which"):
+        machine.succeed("grep -q 'fleet_backup_repository_up{kind=\"state\"} 1' /var/lib/metrics/fleet-backup.prom")
+        last = machine.succeed("grep last_success /var/lib/metrics/fleet-backup.prom")
         machine.succeed("rm -r /var/backup/state")
         machine.fail("systemctl start fleet-backup.service")
         machine.fail("test -e /var/backup/state/config")
+        journal = machine.succeed("journalctl -u fleet-backup.service --since -2min --no-pager")
+        assert "the state repository does not exist or cannot be reached" in journal, journal
+        assert "mail: not backed up, the state repository is not there" in journal, journal
+        # no entry was snapshotted for it, and the metrics were still written
+        assert "backing up" not in journal.split("cannot be reached")[-1], journal
+        metrics = machine.succeed("cat /var/lib/metrics/fleet-backup.prom")
+        assert 'fleet_backup_repository_up{kind="state"} 0' in metrics, metrics
+        assert last in metrics, (last, metrics)  # the last success stays what it was
         no_leftovers()
   '';
 }

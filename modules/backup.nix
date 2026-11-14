@@ -151,8 +151,9 @@ in
       example = "/var/lib/prometheus-node-exporter-text-files";
       description = ''
         Where to write fleet-backup.prom for node_exporter's textfile
-        collector: `fleet_backup_last_success_timestamp_seconds` and
-        `fleet_backup_snapshots{kind}`.
+        collector: `fleet_backup_last_success_timestamp_seconds`,
+        `fleet_backup_repository_up{kind}` (0: missing or out of reach, its
+        entries not backed up) and `fleet_backup_snapshots{kind}`.
       '';
     };
   };
